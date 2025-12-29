@@ -1,0 +1,16 @@
+{
+  "imports": {
+    "@punkpeye/fastmcp": "jsr:@punkpeye/fastmcp@^3.22.0",
+    "@std/dotenv": "jsr:@std/dotenv@^0.225.5",
+    "@std/path": "jsr:@std/path@^1.1.2",
+    "@zod/zod": "jsr:@zod/zod@^4.1.12"
+  },
+  "tasks": {
+    "dev": "deno run -A scripts/ensure_ollama_model.ts && deno run -A scripts/ensure_qdrant.ts && deno run -A src/server.ts",
+    "start": "deno run -A src/server.ts",
+    "ensure:ollama": "deno run -A scripts/ensure_ollama_model.ts",
+    "ensure:qdrant": "deno run -A scripts/ensure_qdrant.ts",
+    "fmt": "deno fmt",
+    "check": "deno check src/server.ts"
+  }
+}

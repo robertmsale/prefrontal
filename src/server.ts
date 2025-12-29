@@ -1,0 +1,792 @@
+import { FastMCP } from "@punkpeye/fastmcp";
+import { z } from "@zod/zod";
+import { loadConfig } from "./config.ts";
+import { embedDocument, embedQuery } from "./ollama.ts";
+import { QdrantRestClient } from "./qdrant.ts";
+
+const TASK_VECTOR_SIZE = 1024;
+const LOCK_VECTOR_SIZE = 1;
+const ACTIVITY_VECTOR_SIZE = 1;
+const REPO_CHUNK_VECTOR_SIZE = 1024;
+
+type TaskStatus =
+  | "open"
+  | "claimed"
+  | "in_progress"
+  | "blocked"
+  | "done"
+  | "abandoned";
+
+function nowMs(): number {
+  return Date.now();
+}
+
+function ok<T>(value: T) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(value, null, 2) }] as any[],
+  };
+}
+
+function qdrantCollections(prefix: string) {
+  return {
+    tasks: `${prefix}_tasks`,
+    locks: `${prefix}_locks`,
+    activity: `${prefix}_activity`,
+    repoChunks: `${prefix}_repo_chunks`,
+  };
+}
+
+const ClaimedBySchema = z.object({
+  agent_id: z.string(),
+  worktree: z.string().optional(),
+  branch: z.string().optional(),
+});
+
+const TaskSchema = z.object({
+  task_id: z.string(),
+  title: z.string(),
+  description: z.string(),
+  status: z.enum([
+    "open",
+    "claimed",
+    "in_progress",
+    "blocked",
+    "done",
+    "abandoned",
+  ]),
+  claimed_by: ClaimedBySchema.nullable().optional(),
+  related_paths: z.array(z.string()).default([]),
+  base_commit: z.string().optional(),
+  last_update_at: z.number().int(),
+  lease_until: z.number().int().nullable().optional(),
+  version: z.number().int(),
+  priority: z.number().int().optional(),
+  tags: z.array(z.string()).optional(),
+});
+
+const LockSchema = z.object({
+  path: z.string(),
+  agent_id: z.string(),
+  mode: z.enum(["soft", "hard"]).default("soft"),
+  expires_at: z.number().int(),
+});
+
+const ActivityEventSchema = z.object({
+  event_id: z.string(),
+  ts: z.number().int(),
+  type: z.string(),
+  message: z.string(),
+  related_paths: z.array(z.string()).optional(),
+  task_id: z.string().optional(),
+});
+
+const RepoChunkSchema = z.object({
+  chunk_id: z.string(),
+  kind: z.string(),
+  path: z.string(),
+  commit: z.string().optional(),
+  authority: z.number().int().min(1).max(5).optional(),
+  content_hash: z.string().optional(),
+  chunk: z.record(z.string(), z.unknown()).optional(),
+  text: z.string(),
+});
+
+async function main() {
+  const config = await loadConfig();
+  const collections = qdrantCollections(config.qdrantPrefix);
+
+  const qdrant = new QdrantRestClient(config.qdrantUrl, config.qdrantApiKey);
+
+  // Sanity check: embedding dimensionality must match collection schema.
+  const dimProbe = await embedQuery(
+    config.ollamaUrl,
+    config.ollamaModel,
+    "prefrontal-dim-probe",
+  );
+  if (dimProbe.vector.length !== TASK_VECTOR_SIZE) {
+    throw new Error(
+      `Embedding dimension mismatch: expected ${TASK_VECTOR_SIZE} but got ${dimProbe.vector.length} from Ollama model '${config.ollamaModel}'.`,
+    );
+  }
+
+  await qdrant.createCollectionIfMissing(collections.tasks, {
+    size: TASK_VECTOR_SIZE,
+    distance: "Cosine",
+  });
+  await qdrant.createCollectionIfMissing(collections.repoChunks, {
+    size: REPO_CHUNK_VECTOR_SIZE,
+    distance: "Cosine",
+  });
+  await qdrant.createCollectionIfMissing(collections.locks, {
+    size: LOCK_VECTOR_SIZE,
+    distance: "Cosine",
+  });
+  await qdrant.createCollectionIfMissing(collections.activity, {
+    size: ACTIVITY_VECTOR_SIZE,
+    distance: "Cosine",
+  });
+
+  await qdrant.createPayloadIndex(collections.tasks, "status", "keyword").catch(
+    () => {},
+  );
+  await qdrant.createPayloadIndex(
+    collections.tasks,
+    "last_update_at",
+    "integer",
+  ).catch(() => {});
+  await qdrant.createPayloadIndex(collections.activity, "ts", "integer").catch(
+    () => {},
+  );
+  await qdrant.createPayloadIndex(collections.locks, "path", "keyword").catch(
+    () => {},
+  );
+  await qdrant.createPayloadIndex(collections.locks, "expires_at", "integer")
+    .catch(() => {});
+
+  const server = new FastMCP({
+    name: "prefrontal",
+    version: "0.1.0",
+  });
+
+  // --- activity ---
+  server.addTool({
+    name: "activity.post",
+    description: "Append an activity event to the project digest stream.",
+    parameters: z.object({
+      type: z.string(),
+      message: z.string(),
+      related_paths: z.array(z.string()).optional(),
+      task_id: z.string().optional(),
+    }),
+    execute: async (args) => {
+      const event = ActivityEventSchema.parse({
+        event_id: crypto.randomUUID(),
+        ts: nowMs(),
+        type: args.type,
+        message: args.message,
+        related_paths: args.related_paths,
+        task_id: args.task_id,
+      });
+
+      await qdrant.upsert(collections.activity, [{
+        id: event.event_id,
+        vector: [0],
+        payload: event as any,
+      }], true);
+
+      return ok(event);
+    },
+  });
+
+  server.addTool({
+    name: "activity.digest",
+    description:
+      "Get recent activity events since a cursor (milliseconds since epoch).",
+    parameters: z.object({
+      since_cursor: z.number().int().optional(),
+      limit: z.number().int().min(1).max(200).default(50),
+    }),
+    execute: async (args) => {
+      const since = args.since_cursor ?? 0;
+      const points = await qdrant.scroll(collections.activity, {
+        limit: args.limit,
+        order_by: { key: "ts", direction: "asc", start_from: since + 1 },
+        with_payload: true,
+        with_vectors: false,
+      });
+
+      const events = points.map((p) => p.payload).filter(Boolean).map((
+        p: any,
+      ) => ActivityEventSchema.parse(p));
+      const nextCursor = events.length ? events[events.length - 1].ts : since;
+      return ok({ events, next_cursor: nextCursor });
+    },
+  });
+
+  // --- tasks ---
+  server.addTool({
+    name: "tasks.create",
+    description: "Create a new coordination task.",
+    parameters: z.object({
+      title: z.string(),
+      description: z.string(),
+      related_paths: z.array(z.string()).default([]),
+      priority: z.number().int().optional(),
+      tags: z.array(z.string()).optional(),
+      base_commit: z.string().optional(),
+    }),
+    execute: async (args) => {
+      const taskId = crypto.randomUUID();
+      const taskText = `${args.title}\n${args.description}\n${
+        args.related_paths.join("\n")
+      }`;
+      const vec = await embedDocument(
+        config.ollamaUrl,
+        config.ollamaModel,
+        taskText,
+      );
+
+      const task = TaskSchema.parse({
+        task_id: taskId,
+        title: args.title,
+        description: args.description,
+        status: "open" as TaskStatus,
+        claimed_by: null,
+        related_paths: args.related_paths,
+        base_commit: args.base_commit,
+        last_update_at: nowMs(),
+        lease_until: null,
+        version: 0,
+        priority: args.priority,
+        tags: args.tags,
+      });
+
+      await qdrant.upsert(collections.tasks, [{
+        id: taskId,
+        vector: vec.vector,
+        payload: task as any,
+      }], true);
+
+      await qdrant.upsert(collections.activity, [{
+        id: crypto.randomUUID(),
+        vector: [0],
+        payload: {
+          event_id: crypto.randomUUID(),
+          ts: nowMs(),
+          type: "task_created",
+          message: task.title,
+          related_paths: task.related_paths,
+          task_id: task.task_id,
+        },
+      }], true).catch(() => {});
+
+      return ok({ task_id: taskId });
+    },
+  });
+
+  server.addTool({
+    name: "tasks.list_active",
+    description: "List active tasks (structured, not semantic).",
+    parameters: z.object({
+      status_in: z.array(
+        z.enum([
+          "open",
+          "claimed",
+          "in_progress",
+          "blocked",
+          "done",
+          "abandoned",
+        ]),
+      ).optional(),
+      limit: z.number().int().min(1).max(200).default(100),
+    }),
+    execute: async (args) => {
+      const statuses = args.status_in ??
+        ["open", "claimed", "in_progress", "blocked"];
+      const points = await qdrant.scroll(collections.tasks, {
+        limit: args.limit,
+        filter: {
+          must: [{
+            key: "status",
+            match: { any: statuses },
+          }],
+        },
+        with_payload: true,
+        with_vectors: false,
+      });
+      const tasks = points.map((p) => p.payload).filter(Boolean).map((p: any) =>
+        TaskSchema.parse(p)
+      );
+      return ok({ tasks });
+    },
+  });
+
+  server.addTool({
+    name: "tasks.search_similar",
+    description: "Semantic search for tasks that overlap with a query.",
+    parameters: z.object({
+      query: z.string(),
+      status_in: z.array(
+        z.enum([
+          "open",
+          "claimed",
+          "in_progress",
+          "blocked",
+          "done",
+          "abandoned",
+        ]),
+      ).optional(),
+      k: z.number().int().min(1).max(50).default(10),
+    }),
+    execute: async (args) => {
+      const statuses = args.status_in ??
+        ["open", "claimed", "in_progress", "blocked"];
+      const q = await embedQuery(
+        config.ollamaUrl,
+        config.ollamaModel,
+        args.query,
+      );
+      const hits = await qdrant.search(collections.tasks, q.vector, args.k, {
+        must: [{
+          key: "status",
+          match: { any: statuses },
+        }],
+      }, true);
+      const results = hits.map((h: any) => ({
+        score: h.score,
+        task: TaskSchema.parse(h.payload),
+      }));
+      return ok({ results });
+    },
+  });
+
+  async function getTask(taskId: string) {
+    const pts = await qdrant.retrieve(collections.tasks, [taskId], true, false);
+    if (!pts.length) return null;
+    const payload = pts[0].payload;
+    if (!payload) return null;
+    return TaskSchema.parse(payload);
+  }
+
+  server.addTool({
+    name: "tasks.claim",
+    description:
+      "Claim a task using optimistic concurrency via the task version field.",
+    parameters: z.object({
+      task_id: z.string(),
+      agent_id: z.string(),
+      worktree: z.string().optional(),
+      branch: z.string().optional(),
+      lease_seconds: z.number().int().min(30).max(60 * 60 * 24).default(
+        15 * 60,
+      ),
+    }),
+    execute: async (args) => {
+      const task = await getTask(args.task_id);
+      if (!task) return ok({ ok: false, conflict: true, reason: "not_found" });
+      if (task.status === "done" || task.status === "abandoned") {
+        return ok({ ok: false, conflict: true, reason: "not_claimable" });
+      }
+
+      const currentLeaseUntil = task.lease_until ?? 0;
+      const leaseExpired = currentLeaseUntil !== 0 &&
+        currentLeaseUntil < nowMs();
+      const heldByOther = task.claimed_by &&
+        task.claimed_by.agent_id !== args.agent_id && !leaseExpired;
+      if (heldByOther) {
+        return ok({
+          ok: false,
+          conflict: true,
+          reason: "already_claimed",
+          claimed_by: task.claimed_by,
+        });
+      }
+
+      const nextVersion = task.version + 1;
+      const leaseUntil = nowMs() + args.lease_seconds * 1000;
+      const claimedBy = {
+        agent_id: args.agent_id,
+        worktree: args.worktree,
+        branch: args.branch,
+      };
+
+      await qdrant.setPayload(
+        collections.tasks,
+        {
+          status: "in_progress",
+          claimed_by: claimedBy,
+          lease_until: leaseUntil,
+          last_update_at: nowMs(),
+          version: nextVersion,
+        },
+        {
+          must: [
+            { key: "task_id", match: { value: args.task_id } },
+            { key: "version", match: { value: task.version } },
+          ],
+        },
+        true,
+      );
+
+      const after = await getTask(args.task_id);
+      const okClaim = after?.version === nextVersion &&
+        after?.claimed_by?.agent_id === args.agent_id;
+
+      if (!okClaim) {
+        return ok({ ok: false, conflict: true, reason: "version_conflict" });
+      }
+
+      await qdrant.upsert(collections.activity, [{
+        id: crypto.randomUUID(),
+        vector: [0],
+        payload: {
+          event_id: crypto.randomUUID(),
+          ts: nowMs(),
+          type: "task_claimed",
+          message: `${after!.title} (claimed by ${args.agent_id})`,
+          related_paths: after!.related_paths,
+          task_id: after!.task_id,
+        },
+      }], true).catch(() => {});
+
+      return ok({ ok: true });
+    },
+  });
+
+  server.addTool({
+    name: "tasks.update",
+    description: "Update task status/progress with optimistic concurrency.",
+    parameters: z.object({
+      task_id: z.string(),
+      status: z.enum([
+        "open",
+        "claimed",
+        "in_progress",
+        "blocked",
+        "done",
+        "abandoned",
+      ]).optional(),
+      progress_note: z.string().optional(),
+      related_paths: z.array(z.string()).optional(),
+      lease_extend_seconds: z.number().int().min(30).max(60 * 60 * 24)
+        .optional(),
+    }),
+    execute: async (args) => {
+      const task = await getTask(args.task_id);
+      if (!task) return ok({ ok: false, reason: "not_found" });
+
+      const nextVersion = task.version + 1;
+      const nextLease = args.lease_extend_seconds
+        ? (nowMs() + args.lease_extend_seconds * 1000)
+        : task.lease_until;
+
+      const patch: Record<string, unknown> = {
+        version: nextVersion,
+        last_update_at: nowMs(),
+      };
+      if (args.status) patch.status = args.status;
+      if (args.related_paths) patch.related_paths = args.related_paths;
+      if (typeof nextLease !== "undefined") patch.lease_until = nextLease;
+
+      await qdrant.setPayload(collections.tasks, patch, {
+        must: [
+          { key: "task_id", match: { value: args.task_id } },
+          { key: "version", match: { value: task.version } },
+        ],
+      }, true);
+
+      const after = await getTask(args.task_id);
+      if (!after || after.version !== nextVersion) {
+        return ok({ ok: false, conflict: true, reason: "version_conflict" });
+      }
+
+      if (args.progress_note) {
+        await qdrant.upsert(collections.activity, [{
+          id: crypto.randomUUID(),
+          vector: [0],
+          payload: {
+            event_id: crypto.randomUUID(),
+            ts: nowMs(),
+            type: "task_progress",
+            message: `${after.title}: ${args.progress_note}`,
+            related_paths: after.related_paths,
+            task_id: after.task_id,
+          },
+        }], true).catch(() => {});
+      }
+
+      return ok({ ok: true });
+    },
+  });
+
+  server.addTool({
+    name: "tasks.complete",
+    description: "Mark a task done (optionally attaching a result commit).",
+    parameters: z.object({
+      task_id: z.string(),
+      result_commit: z.string().optional(),
+    }),
+    execute: async (args) => {
+      const task = await getTask(args.task_id);
+      if (!task) return ok({ ok: false, reason: "not_found" });
+      const nextVersion = task.version + 1;
+
+      await qdrant.setPayload(collections.tasks, {
+        status: "done",
+        last_update_at: nowMs(),
+        version: nextVersion,
+        result_commit: args.result_commit ?? null,
+      }, {
+        must: [
+          { key: "task_id", match: { value: args.task_id } },
+          { key: "version", match: { value: task.version } },
+        ],
+      }, true);
+
+      const after = await getTask(args.task_id);
+      if (!after || after.version !== nextVersion) {
+        return ok({ ok: false, conflict: true, reason: "version_conflict" });
+      }
+
+      await qdrant.upsert(collections.activity, [{
+        id: crypto.randomUUID(),
+        vector: [0],
+        payload: {
+          event_id: crypto.randomUUID(),
+          ts: nowMs(),
+          type: "task_done",
+          message: `${after.title}${
+            args.result_commit ? ` (commit ${args.result_commit})` : ""
+          }`,
+          related_paths: after.related_paths,
+          task_id: after.task_id,
+        },
+      }], true).catch(() => {});
+
+      return ok({ ok: true });
+    },
+  });
+
+  // --- locks ---
+  server.addTool({
+    name: "locks.acquire",
+    description:
+      "Acquire best-effort locks for repo paths (soft/hard with TTL).",
+    parameters: z.object({
+      paths: z.array(z.string()).min(1),
+      agent_id: z.string(),
+      ttl_seconds: z.number().int().min(30).max(60 * 60 * 24).default(20 * 60),
+      mode: z.enum(["soft", "hard"]).default("soft"),
+    }),
+    execute: async (args) => {
+      const expiresAt = nowMs() + args.ttl_seconds * 1000;
+      const results: Array<
+        {
+          path: string;
+          ok: boolean;
+          reason?: string;
+          held_by?: string;
+          expires_at?: number;
+        }
+      > = [];
+
+      for (const path of args.paths) {
+        const id = path;
+        const existing = await qdrant.retrieve(
+          collections.locks,
+          [id],
+          true,
+          false,
+        ).catch(() => []);
+        const cur = existing.length ? existing[0]?.payload : null;
+        const parsed = cur ? LockSchema.safeParse(cur) : null;
+        const held = parsed?.success ? parsed.data : null;
+
+        const expired = held ? held.expires_at < nowMs() : true;
+        const heldByOther = held && held.agent_id !== args.agent_id && !expired;
+        if (heldByOther && args.mode === "hard") {
+          results.push({
+            path,
+            ok: false,
+            reason: "locked",
+            held_by: held.agent_id,
+            expires_at: held.expires_at,
+          });
+          continue;
+        }
+
+        const lock = LockSchema.parse({
+          path,
+          agent_id: args.agent_id,
+          mode: args.mode,
+          expires_at: expiresAt,
+        });
+        await qdrant.upsert(collections.locks, [{
+          id,
+          vector: [0],
+          payload: lock as any,
+        }], true);
+        results.push({ path, ok: true, expires_at: expiresAt });
+      }
+
+      await qdrant.upsert(collections.activity, [{
+        id: crypto.randomUUID(),
+        vector: [0],
+        payload: {
+          event_id: crypto.randomUUID(),
+          ts: nowMs(),
+          type: "locks_acquire",
+          message: `${args.agent_id} acquired ${args.mode} locks`,
+          related_paths: args.paths,
+        },
+      }], true).catch(() => {});
+
+      return ok({ results });
+    },
+  });
+
+  server.addTool({
+    name: "locks.release",
+    description: "Release locks held by an agent for given paths.",
+    parameters: z.object({
+      paths: z.array(z.string()).min(1),
+      agent_id: z.string(),
+    }),
+    execute: async (args) => {
+      const results: Array<{ path: string; ok: boolean }> = [];
+      for (const path of args.paths) {
+        const id = path;
+        const existing = await qdrant.retrieve(
+          collections.locks,
+          [id],
+          true,
+          false,
+        ).catch(() => []);
+        const cur = existing.length ? existing[0]?.payload : null;
+        const parsed = cur ? LockSchema.safeParse(cur) : null;
+        const held = parsed?.success ? parsed.data : null;
+        if (!held) {
+          results.push({ path, ok: true });
+          continue;
+        }
+        if (held.agent_id !== args.agent_id) {
+          results.push({ path, ok: false });
+          continue;
+        }
+        // "Release" by expiring immediately.
+        await qdrant.setPayload(collections.locks, { expires_at: 0 }, {
+          must: [{ key: "path", match: { value: path } }],
+        }, true);
+        results.push({ path, ok: true });
+      }
+      return ok({ results });
+    },
+  });
+
+  server.addTool({
+    name: "locks.list",
+    description:
+      "List non-expired locks (optionally filtered by path prefix via client-side filtering).",
+    parameters: z.object({
+      limit: z.number().int().min(1).max(500).default(200),
+    }),
+    execute: async (args) => {
+      const points = await qdrant.scroll(collections.locks, {
+        limit: args.limit,
+        with_payload: true,
+        with_vectors: false,
+      });
+      const locks = points.map((p) => p.payload).filter(Boolean).map((p: any) =>
+        LockSchema.safeParse(p)
+      ).filter((r) => r.success).map((r: any) => r.data)
+        .filter((l: any) => l.expires_at > nowMs());
+      return ok({ locks });
+    },
+  });
+
+  // --- memory (derived) ---
+  server.addTool({
+    name: "memory.upsert_chunks",
+    description:
+      "Upsert derived repo/doc chunks (intended for indexers, not workers).",
+    parameters: z.object({
+      chunks: z.array(RepoChunkSchema).min(1),
+    }),
+    execute: async (args) => {
+      const points = [];
+      for (const c of args.chunks) {
+        const vec = await embedDocument(
+          config.ollamaUrl,
+          config.ollamaModel,
+          c.text,
+        );
+        points.push({ id: c.chunk_id, vector: vec.vector, payload: c as any });
+      }
+      await qdrant.upsert(collections.repoChunks, points, true);
+      return ok({ ok: true, upserted: points.length });
+    },
+  });
+
+  server.addTool({
+    name: "memory.search",
+    description:
+      "Semantic search over derived repo/doc chunks (non-authoritative).",
+    parameters: z.object({
+      query: z.string(),
+      kind: z.string().optional(),
+      path: z.string().optional(),
+      k: z.number().int().min(1).max(50).default(8),
+    }),
+    execute: async (args) => {
+      const q = await embedQuery(
+        config.ollamaUrl,
+        config.ollamaModel,
+        args.query,
+      );
+      const must: any[] = [];
+      if (args.kind) must.push({ key: "kind", match: { value: args.kind } });
+      if (args.path) must.push({ key: "path", match: { value: args.path } });
+      const hits = await qdrant.search(
+        collections.repoChunks,
+        q.vector,
+        args.k,
+        must.length ? { must } : undefined,
+        true,
+      );
+      const results = hits.map((h: any) => ({
+        score: h.score,
+        chunk: h.payload,
+      }));
+      return ok({ results });
+    },
+  });
+
+  server.addTool({
+    name: "memory.get_file_context",
+    description:
+      "Retrieve chunks for a specific file path (optionally ranked by a query).",
+    parameters: z.object({
+      path: z.string(),
+      query: z.string().optional(),
+      k: z.number().int().min(1).max(50).default(10),
+    }),
+    execute: async (args) => {
+      if (args.query) {
+        const q = await embedQuery(
+          config.ollamaUrl,
+          config.ollamaModel,
+          args.query,
+        );
+        const hits = await qdrant.search(
+          collections.repoChunks,
+          q.vector,
+          args.k,
+          { must: [{ key: "path", match: { value: args.path } }] },
+          true,
+        );
+        return ok({
+          results: hits.map((h: any) => ({ score: h.score, chunk: h.payload })),
+        });
+      }
+      const points = await qdrant.scroll(collections.repoChunks, {
+        limit: args.k,
+        filter: { must: [{ key: "path", match: { value: args.path } }] },
+        with_payload: true,
+        with_vectors: false,
+      });
+      return ok({ results: points.map((p) => p.payload) });
+    },
+  });
+
+  await server.start({
+    transportType: "httpStream",
+    httpStream: {
+      host: config.host,
+      port: config.port,
+      endpoint: config.endpoint,
+      stateless: false,
+    },
+  } as any);
+}
+
+await main();
