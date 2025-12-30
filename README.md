@@ -19,7 +19,7 @@ deno task ensure:ollama
 3. Run the MCP server (HTTP streaming):
 
 ```bash
-deno task dev
+deno task serve
 ```
 
 Defaults:

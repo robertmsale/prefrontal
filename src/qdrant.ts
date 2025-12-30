@@ -169,12 +169,10 @@ export class QdrantRestClient {
     wait = true,
   ): Promise<void> {
     await this.requestJson(
-      `/collections/${encodeURIComponent(collection)}/points/payload?wait=${
-        wait ? "true" : "false"
-      }`,
+      `/collections/${encodeURIComponent(collection)}/points/payload`,
       {
         method: "POST",
-        body: JSON.stringify({ payload, filter }),
+        body: JSON.stringify({ payload, filter, wait }),
       },
     );
   }

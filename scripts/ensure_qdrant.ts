@@ -7,11 +7,20 @@ const qdrantUrl =
     .replace(/\/+$/, "");
 
 try {
-  const res = await fetch(`${qdrantUrl}/collections`, {
-    headers: { accept: "application/json" },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-  console.log(`Qdrant OK: reachable (${qdrantUrl})`);
+  const maxAttempts = 30;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(`${qdrantUrl}/collections`, {
+        headers: { accept: "application/json" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      console.log(`Qdrant OK: reachable (${qdrantUrl})`);
+      Deno.exit(0);
+    } catch (_err) {
+      if (attempt === maxAttempts) throw _err;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
 } catch (err) {
   console.error(`Qdrant not reachable at ${qdrantUrl}.`);
   console.error("Start it with: `docker compose up -d qdrant`");

@@ -21,6 +21,20 @@ function nowMs(): number {
   return Date.now();
 }
 
+async function stableUuid(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const b = hash.slice(0, 16);
+  // UUID v5-ish (deterministic), variant RFC4122.
+  b[6] = (b[6] & 0x0f) | 0x50;
+  b[8] = (b[8] & 0x3f) | 0x80;
+
+  const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${
+    hex.slice(16, 20)
+  }-${hex.slice(20)}`;
+}
+
 function ok<T>(value: T) {
   return {
     content: [{ type: "text", text: JSON.stringify(value, null, 2) }] as any[],
@@ -129,12 +143,27 @@ async function main() {
   await qdrant.createPayloadIndex(collections.tasks, "status", "keyword").catch(
     () => {},
   );
+  await qdrant.createPayloadIndex(collections.tasks, "task_id", "keyword")
+    .catch(
+      () => {},
+    );
+  await qdrant.createPayloadIndex(collections.tasks, "version", "integer")
+    .catch(
+      () => {},
+    );
   await qdrant.createPayloadIndex(
     collections.tasks,
     "last_update_at",
     "integer",
   ).catch(() => {});
   await qdrant.createPayloadIndex(collections.activity, "ts", "integer").catch(
+    () => {},
+  );
+  await qdrant.createPayloadIndex(collections.locks, "agent_id", "keyword")
+    .catch(
+      () => {},
+    );
+  await qdrant.createPayloadIndex(collections.locks, "mode", "keyword").catch(
     () => {},
   );
   await qdrant.createPayloadIndex(collections.locks, "path", "keyword").catch(
@@ -150,7 +179,7 @@ async function main() {
 
   // --- activity ---
   server.addTool({
-    name: "activity.post",
+    name: "activity_post",
     description: "Append an activity event to the project digest stream.",
     parameters: z.object({
       type: z.string(),
@@ -179,7 +208,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "activity.digest",
+    name: "activity_digest",
     description:
       "Get recent activity events since a cursor (milliseconds since epoch).",
     parameters: z.object({
@@ -205,7 +234,7 @@ async function main() {
 
   // --- tasks ---
   server.addTool({
-    name: "tasks.create",
+    name: "tasks_create",
     description: "Create a new coordination task.",
     parameters: z.object({
       title: z.string(),
@@ -265,7 +294,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "tasks.list_active",
+    name: "tasks_list_active",
     description: "List active tasks (structured, not semantic).",
     parameters: z.object({
       status_in: z.array(
@@ -302,7 +331,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "tasks.search_similar",
+    name: "tasks_search_similar",
     description: "Semantic search for tasks that overlap with a query.",
     parameters: z.object({
       query: z.string(),
@@ -349,7 +378,7 @@ async function main() {
   }
 
   server.addTool({
-    name: "tasks.claim",
+    name: "tasks_claim",
     description:
       "Claim a task using optimistic concurrency via the task version field.",
     parameters: z.object({
@@ -434,7 +463,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "tasks.update",
+    name: "tasks_update",
     description: "Update task status/progress with optimistic concurrency.",
     parameters: z.object({
       task_id: z.string(),
@@ -500,7 +529,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "tasks.complete",
+    name: "tasks_complete",
     description: "Mark a task done (optionally attaching a result commit).",
     parameters: z.object({
       task_id: z.string(),
@@ -549,7 +578,7 @@ async function main() {
 
   // --- locks ---
   server.addTool({
-    name: "locks.acquire",
+    name: "locks_acquire",
     description:
       "Acquire best-effort locks for repo paths (soft/hard with TTL).",
     parameters: z.object({
@@ -571,41 +600,52 @@ async function main() {
       > = [];
 
       for (const path of args.paths) {
-        const id = path;
-        const existing = await qdrant.retrieve(
-          collections.locks,
-          [id],
-          true,
-          false,
-        ).catch(() => []);
-        const cur = existing.length ? existing[0]?.payload : null;
-        const parsed = cur ? LockSchema.safeParse(cur) : null;
-        const held = parsed?.success ? parsed.data : null;
+        const active = await qdrant.scroll(collections.locks, {
+          limit: 200,
+          filter: {
+            must: [
+              { key: "path", match: { value: path } },
+              { key: "expires_at", range: { gte: nowMs() } },
+            ],
+          },
+          with_payload: true,
+          with_vectors: false,
+        });
 
-        const expired = held ? held.expires_at < nowMs() : true;
-        const heldByOther = held && held.agent_id !== args.agent_id && !expired;
-        if (heldByOther && args.mode === "hard") {
+        const activeLocks = active.map((p) => p.payload).filter(Boolean).map(
+          (p: any) => LockSchema.safeParse(p),
+        ).filter((r) => r.success).map((r: any) =>
+          r.data as z.infer<
+            typeof LockSchema
+          >
+        );
+
+        const blocking = activeLocks.find((l) =>
+          l.agent_id !== args.agent_id && l.mode === "hard"
+        );
+        if (args.mode === "hard" && blocking) {
           results.push({
             path,
             ok: false,
-            reason: "locked",
-            held_by: held.agent_id,
-            expires_at: held.expires_at,
+            reason: "hard_locked",
+            held_by: blocking.agent_id,
+            expires_at: blocking.expires_at,
           });
           continue;
         }
 
+        const id = await stableUuid(`lock:${path}:${args.agent_id}`);
         const lock = LockSchema.parse({
           path,
           agent_id: args.agent_id,
           mode: args.mode,
           expires_at: expiresAt,
         });
-        await qdrant.upsert(collections.locks, [{
-          id,
-          vector: [0],
-          payload: lock as any,
-        }], true);
+        await qdrant.upsert(
+          collections.locks,
+          [{ id, vector: [0], payload: lock as any }],
+          true,
+        );
         results.push({ path, ok: true, expires_at: expiresAt });
       }
 
@@ -626,7 +666,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "locks.release",
+    name: "locks_release",
     description: "Release locks held by an agent for given paths.",
     parameters: z.object({
       paths: z.array(z.string()).min(1),
@@ -635,13 +675,14 @@ async function main() {
     execute: async (args) => {
       const results: Array<{ path: string; ok: boolean }> = [];
       for (const path of args.paths) {
-        const id = path;
+        const id = await stableUuid(`lock:${path}:${args.agent_id}`);
         const existing = await qdrant.retrieve(
           collections.locks,
           [id],
           true,
           false,
-        ).catch(() => []);
+        )
+          .catch(() => []);
         const cur = existing.length ? existing[0]?.payload : null;
         const parsed = cur ? LockSchema.safeParse(cur) : null;
         const held = parsed?.success ? parsed.data : null;
@@ -653,10 +694,17 @@ async function main() {
           results.push({ path, ok: false });
           continue;
         }
-        // "Release" by expiring immediately.
-        await qdrant.setPayload(collections.locks, { expires_at: 0 }, {
-          must: [{ key: "path", match: { value: path } }],
-        }, true);
+        const released = LockSchema.parse({
+          path,
+          agent_id: args.agent_id,
+          mode: held.mode,
+          expires_at: 0,
+        });
+        await qdrant.upsert(
+          collections.locks,
+          [{ id, vector: [0], payload: released as any }],
+          true,
+        );
         results.push({ path, ok: true });
       }
       return ok({ results });
@@ -664,7 +712,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "locks.list",
+    name: "locks_list",
     description:
       "List non-expired locks (optionally filtered by path prefix via client-side filtering).",
     parameters: z.object({
@@ -686,7 +734,7 @@ async function main() {
 
   // --- memory (derived) ---
   server.addTool({
-    name: "memory.upsert_chunks",
+    name: "memory_upsert_chunks",
     description:
       "Upsert derived repo/doc chunks (intended for indexers, not workers).",
     parameters: z.object({
@@ -708,7 +756,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "memory.search",
+    name: "memory_search",
     description:
       "Semantic search over derived repo/doc chunks (non-authoritative).",
     parameters: z.object({
@@ -742,7 +790,7 @@ async function main() {
   });
 
   server.addTool({
-    name: "memory.get_file_context",
+    name: "memory_get_file_context",
     description:
       "Retrieve chunks for a specific file path (optionally ranked by a query).",
     parameters: z.object({
@@ -777,6 +825,16 @@ async function main() {
       return ok({ results: points.map((p) => p.payload) });
     },
   });
+
+  const transport = (Deno.env.get("PREFRONTAL_TRANSPORT") ?? "auto")
+    .toLowerCase();
+  const useStdio = transport === "stdio" ||
+    (transport === "auto" && !Deno.stdin.isTerminal());
+
+  if (useStdio) {
+    await server.start({ transportType: "stdio" } as any);
+    return;
+  }
 
   await server.start({
     transportType: "httpStream",
