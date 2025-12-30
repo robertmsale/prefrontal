@@ -146,16 +146,16 @@ function promptHappyPath(runId: string) {
     "Goal: prove tool usability by exercising tasks, locks, activity, and memory.",
     "",
     "Do these steps STRICTLY by calling the named tools (no placeholders):",
-    `1) tasks_create with title 'smoke-${runId}', description 'smoke test', related_paths ['docs/FACTS.md','src/server.ts']`,
-    "2) tasks_list_active and confirm the created task appears",
-    "3) tasks_claim that task_id with agent_id 'smoke-agent-1', lease_seconds 120",
-    "4) tasks_update with progress_note 'implemented smoke tool calls'",
+    `1) tasks_create with title 'smoke-${runId}', description 'smoke test', related_paths ['docs/FACTS.md','src/server.ts'], priority null, tags null, base_commit null`,
+    "2) tasks_list_active with status_in null, limit 50 and confirm the created task appears",
+    "3) tasks_claim that task_id with agent_id 'smoke-agent-1', worktree null, branch null, lease_seconds 120",
+    "4) tasks_update with status null, progress_note 'implemented smoke tool calls', related_paths null, lease_extend_seconds null",
     "5) locks_acquire with paths ['docs/FACTS.md'], agent_id 'smoke-agent-1', ttl_seconds 120, mode 'soft'",
-    "6) activity_post with type 'smoke', message including the runId, related_paths ['docs/FACTS.md']",
-    `7) memory_upsert_chunks with a single chunk_id 'smoke-chunk-${runId}', kind 'facts', path 'docs/FACTS.md', authority 2, text 'smoke memory chunk ${runId}'`,
-    `8) memory_search query '${runId}' k 5 and report how many results you got`,
+    "6) activity_post with type 'smoke', message including the runId, related_paths ['docs/FACTS.md'], task_id null",
+    `7) memory_upsert_chunks with a single chunk: chunk_id 'smoke-chunk-${runId}', kind 'facts', path 'docs/FACTS.md', commit null, authority 2, content_hash null, chunk null, text 'smoke memory chunk ${runId}'`,
+    `8) memory_search with query '${runId}', kind null, path null, k 5 and report how many results you got`,
     "9) locks_release paths ['docs/FACTS.md'] agent_id 'smoke-agent-1'",
-    "10) tasks_complete for that task_id",
+    "10) tasks_complete for that task_id with result_commit null",
     "",
     "Finish by printing a single JSON object with keys: task_id, chunk_id, memory_results_count.",
   ].join("\n");
@@ -167,12 +167,12 @@ function promptConflicts(runId: string) {
     "Goal: exercise conflict scenarios (task claim + hard lock).",
     "",
     "Do these steps STRICTLY by calling the named tools:",
-    `1) tasks_create with title 'smoke-conflict-${runId}', description 'conflict test', related_paths ['docs/FACTS.md']`,
-    "2) tasks_claim with agent_id 'smoke-agent-A', lease_seconds 120 (expect ok: true)",
-    "3) tasks_claim again for same task_id with agent_id 'smoke-agent-B', lease_seconds 120 (expect ok: false/conflict: true)",
+    `1) tasks_create with title 'smoke-conflict-${runId}', description 'conflict test', related_paths ['docs/FACTS.md'], priority null, tags null, base_commit null`,
+    "2) tasks_claim with agent_id 'smoke-agent-A', worktree null, branch null, lease_seconds 120 (expect ok: true)",
+    "3) tasks_claim again for same task_id with agent_id 'smoke-agent-B', worktree null, branch null, lease_seconds 120 (expect ok: false/conflict: true)",
     "4) locks_acquire with paths ['docs/FACTS.md'], agent_id 'smoke-agent-A', ttl_seconds 120, mode 'hard' (expect ok: true)",
     "5) locks_acquire with same paths, agent_id 'smoke-agent-B', ttl_seconds 120, mode 'hard' (expect ok: false for that path)",
-    "6) activity_post type 'smoke_conflict' message including runId",
+    "6) activity_post with type 'smoke_conflict', message including runId, related_paths ['docs/FACTS.md'], task_id set to the created task_id",
     "",
     "Finish by printing a single JSON object with keys: task_id, claim_conflict_ok (boolean), hard_lock_conflict_ok (boolean).",
   ].join("\n");
@@ -184,8 +184,8 @@ function promptMemoryOnly(runId: string) {
     "Goal: ensure memory tooling works.",
     "",
     "Do these steps STRICTLY by calling the named tools:",
-    `1) memory_upsert_chunks with a single chunk_id 'smoke-chunk-${runId}', kind 'facts', path 'docs/FACTS.md', authority 2, text 'smoke memory chunk ${runId}'`,
-    `2) memory_search query '${runId}' k 5 and report how many results you got`,
+    `1) memory_upsert_chunks with a single chunk: chunk_id 'smoke-chunk-${runId}', kind 'facts', path 'docs/FACTS.md', commit null, authority 2, content_hash null, chunk null, text 'smoke memory chunk ${runId}'`,
+    `2) memory_search with query '${runId}', kind null, path null, k 5 and report how many results you got`,
     "",
     "Finish by printing a single JSON object with keys: chunk_id, memory_results_count.",
   ].join("\n");
@@ -193,12 +193,22 @@ function promptMemoryOnly(runId: string) {
 
 async function main() {
   const runId = crypto.randomUUID().slice(0, 8);
+  const suiteArg = (Deno.args[0] === "--" ? Deno.args[1] : Deno.args[0]) ??
+    "all";
+  const suite = suiteArg.toLowerCase();
   console.log(`Running smoke suite: ${runId}`);
 
   await ensureTooling();
 
-  await codexExec(promptHappyPath(runId));
-  await codexExec(promptConflicts(runId));
+  if (suite === "happy" || suite === "all") {
+    await codexExec(promptHappyPath(runId));
+  }
+  if (suite === "conflicts" || suite === "all") {
+    await codexExec(promptConflicts(runId));
+  }
+  if (suite === "memory") {
+    await codexExec(promptMemoryOnly(runId));
+  }
 
   const tasksCount = await countPoints(collections.tasks);
   const locksCount = await countPoints(collections.locks);
@@ -206,32 +216,59 @@ async function main() {
   let repoChunksCount = await countPoints(collections.repoChunks);
 
   if (repoChunksCount < 1) {
-    await codexExec(promptMemoryOnly(runId));
+    if (suite === "all" || suite === "happy") {
+      await codexExec(promptMemoryOnly(runId));
+    }
     repoChunksCount = await countPoints(collections.repoChunks);
   }
 
   const tasksDim = await sampleVectorDim(collections.tasks);
   const repoChunksDim = await sampleVectorDim(collections.repoChunks);
 
-  // Heuristic assertions: agent tool usage should create at least one task, activity event, and memory chunk.
-  if (tasksCount < 1) {
-    throw new Error(`Expected tasks count >= 1, got ${tasksCount}`);
-  }
-  if (activityCount < 1) {
-    throw new Error(`Expected activity count >= 1, got ${activityCount}`);
-  }
-  if (repoChunksCount < 1) {
-    throw new Error(`Expected repo_chunks count >= 1, got ${repoChunksCount}`);
-  }
-
-  // Confirm embeddings are being stored (vector length should be 1024).
-  if (tasksDim !== 1024) {
-    throw new Error(`Expected tasks vector dim 1024, got ${tasksDim}`);
-  }
-  if (repoChunksDim !== 1024) {
-    throw new Error(
-      `Expected repo_chunks vector dim 1024, got ${repoChunksDim}`,
-    );
+  if (suite === "happy" || suite === "all") {
+    if (tasksCount < 1) {
+      throw new Error(`Expected tasks count >= 1, got ${tasksCount}`);
+    }
+    if (activityCount < 1) {
+      throw new Error(`Expected activity count >= 1, got ${activityCount}`);
+    }
+    if (repoChunksCount < 1) {
+      throw new Error(
+        `Expected repo_chunks count >= 1, got ${repoChunksCount}`,
+      );
+    }
+    if (tasksDim !== 1024) {
+      throw new Error(`Expected tasks vector dim 1024, got ${tasksDim}`);
+    }
+    if (repoChunksDim !== 1024) {
+      throw new Error(
+        `Expected repo_chunks vector dim 1024, got ${repoChunksDim}`,
+      );
+    }
+  } else if (suite === "conflicts") {
+    if (tasksCount < 1) {
+      throw new Error(`Expected tasks count >= 1, got ${tasksCount}`);
+    }
+    if (activityCount < 1) {
+      throw new Error(`Expected activity count >= 1, got ${activityCount}`);
+    }
+    if (locksCount < 1) {
+      throw new Error(`Expected locks count >= 1, got ${locksCount}`);
+    }
+    if (tasksDim !== 1024) {
+      throw new Error(`Expected tasks vector dim 1024, got ${tasksDim}`);
+    }
+  } else if (suite === "memory") {
+    if (repoChunksCount < 1) {
+      throw new Error(
+        `Expected repo_chunks count >= 1, got ${repoChunksCount}`,
+      );
+    }
+    if (repoChunksDim !== 1024) {
+      throw new Error(
+        `Expected repo_chunks vector dim 1024, got ${repoChunksDim}`,
+      );
+    }
   }
 
   console.log("Smoke OK");

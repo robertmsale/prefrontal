@@ -159,7 +159,11 @@ export class QdrantRestClient {
         }),
       },
     );
-    return out?.result ?? [];
+    const result = out?.result;
+    if (Array.isArray(result)) return result;
+    if (Array.isArray(result?.points)) return result.points;
+    if (Array.isArray(out?.points)) return out.points;
+    return [];
   }
 
   async setPayload(

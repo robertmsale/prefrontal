@@ -95,15 +95,20 @@ const ActivityEventSchema = z.object({
 });
 
 const RepoChunkSchema = z.object({
-  chunk_id: z.string(),
-  kind: z.string(),
-  path: z.string(),
-  commit: z.string().optional(),
-  authority: z.number().int().min(1).max(5).optional(),
-  content_hash: z.string().optional(),
-  chunk: z.record(z.string(), z.unknown()).optional(),
-  text: z.string(),
-});
+  chunk_id: z.string().min(1),
+  kind: z.string().min(1),
+  path: z.string().min(1),
+  commit: z.string().min(1).nullable(),
+  authority: z.number().int().min(1).max(5).nullable(),
+  content_hash: z.string().min(1).nullable(),
+  chunk: z.object({
+    start_line: z.number().int().nullable(),
+    end_line: z.number().int().nullable(),
+    byte_start: z.number().int().nullable(),
+    byte_end: z.number().int().nullable(),
+  }).strict().nullable(),
+  text: z.string().min(1),
+}).strict();
 
 async function main() {
   const config = await loadConfig();
@@ -182,19 +187,19 @@ async function main() {
     name: "activity_post",
     description: "Append an activity event to the project digest stream.",
     parameters: z.object({
-      type: z.string(),
-      message: z.string(),
-      related_paths: z.array(z.string()).optional(),
-      task_id: z.string().optional(),
-    }),
+      type: z.string().min(1),
+      message: z.string().min(1),
+      related_paths: z.array(z.string()).nullable(),
+      task_id: z.string().min(1).nullable(),
+    }).strict(),
     execute: async (args) => {
       const event = ActivityEventSchema.parse({
         event_id: crypto.randomUUID(),
         ts: nowMs(),
         type: args.type,
         message: args.message,
-        related_paths: args.related_paths,
-        task_id: args.task_id,
+        related_paths: args.related_paths ?? undefined,
+        task_id: args.task_id ?? undefined,
       });
 
       await qdrant.upsert(collections.activity, [{
@@ -212,9 +217,9 @@ async function main() {
     description:
       "Get recent activity events since a cursor (milliseconds since epoch).",
     parameters: z.object({
-      since_cursor: z.number().int().optional(),
-      limit: z.number().int().min(1).max(200).default(50),
-    }),
+      since_cursor: z.number().int().nullable(),
+      limit: z.number().int().min(1).max(200),
+    }).strict(),
     execute: async (args) => {
       const since = args.since_cursor ?? 0;
       const points = await qdrant.scroll(collections.activity, {
@@ -237,13 +242,13 @@ async function main() {
     name: "tasks_create",
     description: "Create a new coordination task.",
     parameters: z.object({
-      title: z.string(),
-      description: z.string(),
-      related_paths: z.array(z.string()).default([]),
-      priority: z.number().int().optional(),
-      tags: z.array(z.string()).optional(),
-      base_commit: z.string().optional(),
-    }),
+      title: z.string().min(1),
+      description: z.string().min(1),
+      related_paths: z.array(z.string()),
+      priority: z.number().int().nullable(),
+      tags: z.array(z.string()).nullable(),
+      base_commit: z.string().min(1).nullable(),
+    }).strict(),
     execute: async (args) => {
       const taskId = crypto.randomUUID();
       const taskText = `${args.title}\n${args.description}\n${
@@ -262,12 +267,12 @@ async function main() {
         status: "open" as TaskStatus,
         claimed_by: null,
         related_paths: args.related_paths,
-        base_commit: args.base_commit,
+        base_commit: args.base_commit ?? undefined,
         last_update_at: nowMs(),
         lease_until: null,
         version: 0,
-        priority: args.priority,
-        tags: args.tags,
+        priority: args.priority ?? undefined,
+        tags: args.tags ?? undefined,
       });
 
       await qdrant.upsert(collections.tasks, [{
@@ -306,9 +311,9 @@ async function main() {
           "done",
           "abandoned",
         ]),
-      ).optional(),
-      limit: z.number().int().min(1).max(200).default(100),
-    }),
+      ).nullable(),
+      limit: z.number().int().min(1).max(200),
+    }).strict(),
     execute: async (args) => {
       const statuses = args.status_in ??
         ["open", "claimed", "in_progress", "blocked"];
@@ -334,7 +339,7 @@ async function main() {
     name: "tasks_search_similar",
     description: "Semantic search for tasks that overlap with a query.",
     parameters: z.object({
-      query: z.string(),
+      query: z.string().min(1),
       status_in: z.array(
         z.enum([
           "open",
@@ -344,9 +349,9 @@ async function main() {
           "done",
           "abandoned",
         ]),
-      ).optional(),
-      k: z.number().int().min(1).max(50).default(10),
-    }),
+      ).nullable(),
+      k: z.number().int().min(1).max(50),
+    }).strict(),
     execute: async (args) => {
       const statuses = args.status_in ??
         ["open", "claimed", "in_progress", "blocked"];
@@ -382,14 +387,12 @@ async function main() {
     description:
       "Claim a task using optimistic concurrency via the task version field.",
     parameters: z.object({
-      task_id: z.string(),
-      agent_id: z.string(),
-      worktree: z.string().optional(),
-      branch: z.string().optional(),
-      lease_seconds: z.number().int().min(30).max(60 * 60 * 24).default(
-        15 * 60,
-      ),
-    }),
+      task_id: z.string().min(1),
+      agent_id: z.string().min(1),
+      worktree: z.string().min(1).nullable(),
+      branch: z.string().min(1).nullable(),
+      lease_seconds: z.number().int().min(30).max(60 * 60 * 24),
+    }).strict(),
     execute: async (args) => {
       const task = await getTask(args.task_id);
       if (!task) return ok({ ok: false, conflict: true, reason: "not_found" });
@@ -415,8 +418,8 @@ async function main() {
       const leaseUntil = nowMs() + args.lease_seconds * 1000;
       const claimedBy = {
         agent_id: args.agent_id,
-        worktree: args.worktree,
-        branch: args.branch,
+        ...(args.worktree ? { worktree: args.worktree } : {}),
+        ...(args.branch ? { branch: args.branch } : {}),
       };
 
       await qdrant.setPayload(
@@ -466,7 +469,7 @@ async function main() {
     name: "tasks_update",
     description: "Update task status/progress with optimistic concurrency.",
     parameters: z.object({
-      task_id: z.string(),
+      task_id: z.string().min(1),
       status: z.enum([
         "open",
         "claimed",
@@ -474,12 +477,12 @@ async function main() {
         "blocked",
         "done",
         "abandoned",
-      ]).optional(),
-      progress_note: z.string().optional(),
-      related_paths: z.array(z.string()).optional(),
+      ]).nullable(),
+      progress_note: z.string().min(1).nullable(),
+      related_paths: z.array(z.string()).nullable(),
       lease_extend_seconds: z.number().int().min(30).max(60 * 60 * 24)
-        .optional(),
-    }),
+        .nullable(),
+    }).strict(),
     execute: async (args) => {
       const task = await getTask(args.task_id);
       if (!task) return ok({ ok: false, reason: "not_found" });
@@ -532,9 +535,9 @@ async function main() {
     name: "tasks_complete",
     description: "Mark a task done (optionally attaching a result commit).",
     parameters: z.object({
-      task_id: z.string(),
-      result_commit: z.string().optional(),
-    }),
+      task_id: z.string().min(1),
+      result_commit: z.string().min(1).nullable(),
+    }).strict(),
     execute: async (args) => {
       const task = await getTask(args.task_id);
       if (!task) return ok({ ok: false, reason: "not_found" });
@@ -583,10 +586,10 @@ async function main() {
       "Acquire best-effort locks for repo paths (soft/hard with TTL).",
     parameters: z.object({
       paths: z.array(z.string()).min(1),
-      agent_id: z.string(),
-      ttl_seconds: z.number().int().min(30).max(60 * 60 * 24).default(20 * 60),
-      mode: z.enum(["soft", "hard"]).default("soft"),
-    }),
+      agent_id: z.string().min(1),
+      ttl_seconds: z.number().int().min(30).max(60 * 60 * 24),
+      mode: z.enum(["soft", "hard"]),
+    }).strict(),
     execute: async (args) => {
       const expiresAt = nowMs() + args.ttl_seconds * 1000;
       const results: Array<
@@ -670,8 +673,8 @@ async function main() {
     description: "Release locks held by an agent for given paths.",
     parameters: z.object({
       paths: z.array(z.string()).min(1),
-      agent_id: z.string(),
-    }),
+      agent_id: z.string().min(1),
+    }).strict(),
     execute: async (args) => {
       const results: Array<{ path: string; ok: boolean }> = [];
       for (const path of args.paths) {
@@ -716,8 +719,8 @@ async function main() {
     description:
       "List non-expired locks (optionally filtered by path prefix via client-side filtering).",
     parameters: z.object({
-      limit: z.number().int().min(1).max(500).default(200),
-    }),
+      limit: z.number().int().min(1).max(500),
+    }).strict(),
     execute: async (args) => {
       const points = await qdrant.scroll(collections.locks, {
         limit: args.limit,
@@ -739,7 +742,7 @@ async function main() {
       "Upsert derived repo/doc chunks (intended for indexers, not workers).",
     parameters: z.object({
       chunks: z.array(RepoChunkSchema).min(1),
-    }),
+    }).strict(),
     execute: async (args) => {
       const points = [];
       for (const c of args.chunks) {
@@ -748,7 +751,8 @@ async function main() {
           config.ollamaModel,
           c.text,
         );
-        points.push({ id: c.chunk_id, vector: vec.vector, payload: c as any });
+        const id = await stableUuid(`repo_chunk:${c.chunk_id}`);
+        points.push({ id, vector: vec.vector, payload: c as any });
       }
       await qdrant.upsert(collections.repoChunks, points, true);
       return ok({ ok: true, upserted: points.length });
@@ -760,11 +764,11 @@ async function main() {
     description:
       "Semantic search over derived repo/doc chunks (non-authoritative).",
     parameters: z.object({
-      query: z.string(),
-      kind: z.string().optional(),
-      path: z.string().optional(),
-      k: z.number().int().min(1).max(50).default(8),
-    }),
+      query: z.string().min(1),
+      kind: z.string().min(1).nullable(),
+      path: z.string().min(1).nullable(),
+      k: z.number().int().min(1).max(50),
+    }).strict(),
     execute: async (args) => {
       const q = await embedQuery(
         config.ollamaUrl,
@@ -794,10 +798,10 @@ async function main() {
     description:
       "Retrieve chunks for a specific file path (optionally ranked by a query).",
     parameters: z.object({
-      path: z.string(),
-      query: z.string().optional(),
-      k: z.number().int().min(1).max(50).default(10),
-    }),
+      path: z.string().min(1),
+      query: z.string().min(1).nullable(),
+      k: z.number().int().min(1).max(50),
+    }).strict(),
     execute: async (args) => {
       if (args.query) {
         const q = await embedQuery(
