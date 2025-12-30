@@ -256,3 +256,15 @@ export const MemoryGetFileContextParams = z.object({
   ),
   k: z.number().int().min(1).max(50).describe("Number of results to return."),
 }).strict();
+
+export const StatsGetParams = z.object({
+  include_paths: z.boolean().describe(
+    "Whether to compute unique file path references.",
+  ),
+  max_points: z.number().int().min(1).max(100_000).nullable().describe(
+    "Maximum points to scan per collection when computing path stats, or null for default.",
+  ),
+  sample_paths: z.number().int().min(0).max(50).nullable().describe(
+    "Number of example paths to return, or null for default.",
+  ),
+}).strict();

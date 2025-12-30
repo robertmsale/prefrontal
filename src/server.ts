@@ -15,6 +15,7 @@ import {
   MemorySearchParams,
   MemoryUpsertChunksParams,
   RepoChunkSchema,
+  StatsGetParams,
   TaskSchema,
   TasksClaimParams,
   TasksCompleteParams,
@@ -140,6 +141,112 @@ async function main() {
   const server = new FastMCP({
     name: "prefrontal",
     version: "0.1.0",
+  });
+
+  // --- stats (read-only) ---
+  server.addTool({
+    name: "stats_get",
+    description:
+      "Get basic usage stats for the coordination database (counts and optional file path references).",
+    parameters: StatsGetParams,
+    annotations: { readOnlyHint: true },
+    execute: async (args) => {
+      const counts = {
+        repo_chunks: await qdrant.count(collections.repoChunks),
+        tasks: await qdrant.count(collections.tasks),
+        locks: await qdrant.count(collections.locks),
+        activity: await qdrant.count(collections.activity),
+      };
+
+      if (!args.include_paths) {
+        return ok({ counts });
+      }
+
+      const maxPoints = args.max_points ?? 5000;
+      const sampleCount = args.sample_paths ?? 20;
+
+      async function collectPaths(
+        collection: string,
+        addFromPayload: (payload: any, out: Set<string>) => void,
+      ): Promise<{ scanned: number; truncated: boolean }> {
+        const paths = new Set<string>();
+        let scanned = 0;
+        let offset: unknown | undefined = undefined;
+        let truncated = false;
+
+        while (scanned < maxPoints) {
+          const limit = Math.min(256, maxPoints - scanned);
+          const page = await qdrant.scrollPage(collection, {
+            limit,
+            offset,
+            with_payload: true,
+            with_vectors: false,
+          });
+          for (const p of page.points) {
+            const payload = p?.payload;
+            if (payload) addFromPayload(payload, paths);
+          }
+          scanned += page.points.length;
+          if (!page.next_offset) break;
+          offset = page.next_offset;
+          if (page.points.length === 0) break;
+          if (scanned >= maxPoints) truncated = true;
+        }
+
+        for (const path of paths) uniquePaths.add(path);
+        return { scanned, truncated };
+      }
+
+      const uniquePaths = new Set<string>();
+
+      const repoScan = await collectPaths(collections.repoChunks, (p, out) => {
+        const v = p?.path;
+        if (typeof v === "string" && v.length > 0) out.add(v);
+      });
+      const taskScan = await collectPaths(collections.tasks, (p, out) => {
+        const v = p?.related_paths;
+        if (Array.isArray(v)) {
+          for (const x of v) {
+            if (typeof x === "string" && x.length > 0) out.add(x);
+          }
+        }
+      });
+      const lockScan = await collectPaths(collections.locks, (p, out) => {
+        const v = p?.path;
+        if (typeof v === "string" && v.length > 0) out.add(v);
+      });
+      const activityScan = await collectPaths(
+        collections.activity,
+        (p, out) => {
+          const v = p?.related_paths;
+          if (Array.isArray(v)) {
+            for (const x of v) {
+              if (typeof x === "string" && x.length > 0) out.add(x);
+            }
+          }
+        },
+      );
+
+      const sample_paths = Array.from(uniquePaths).sort().slice(0, sampleCount);
+      const truncated = repoScan.truncated || taskScan.truncated ||
+        lockScan.truncated || activityScan.truncated;
+
+      return ok({
+        counts,
+        file_refs: {
+          unique_paths_count: uniquePaths.size,
+          sample_paths,
+        },
+        scanned: {
+          repo_chunks: repoScan.scanned,
+          tasks: taskScan.scanned,
+          locks: lockScan.scanned,
+          activity: activityScan.scanned,
+          truncated,
+          max_points_per_collection: maxPoints,
+        },
+      });
+    },
   });
 
   // --- activity ---

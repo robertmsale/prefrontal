@@ -10,6 +10,7 @@ import {
   MemorySearchParams,
   MemoryUpsertChunksParams,
   RepoChunkSchema,
+  StatsGetParams,
   TasksClaimParams,
   TasksCompleteParams,
   TasksCreateParams,
@@ -46,6 +47,7 @@ Deno.test("tool schemas serialize with descriptions", () => {
     MemoryUpsertChunksParams,
     MemorySearchParams,
     MemoryGetFileContextParams,
+    StatsGetParams,
     RepoChunkSchema,
   ];
 

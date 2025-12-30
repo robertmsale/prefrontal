@@ -185,6 +185,7 @@ export class QdrantRestClient {
     collection: string,
     opts: {
       limit: number;
+      offset?: unknown;
       filter?: QdrantFilter;
       order_by?: string | {
         key: string;
@@ -203,5 +204,45 @@ export class QdrantRestClient {
       },
     );
     return out?.result?.points ?? out?.points ?? [];
+  }
+
+  async scrollPage(
+    collection: string,
+    opts: {
+      limit: number;
+      offset?: unknown;
+      filter?: QdrantFilter;
+      with_payload?: boolean;
+      with_vectors?: boolean;
+    },
+  ): Promise<{ points: any[]; next_offset: unknown | null }> {
+    const out = await this.requestJson<any>(
+      `/collections/${encodeURIComponent(collection)}/points/scroll`,
+      {
+        method: "POST",
+        body: JSON.stringify(opts),
+      },
+    );
+    const points = out?.result?.points ?? out?.points ?? [];
+    const next = out?.result?.next_page_offset ?? out?.next_page_offset ?? null;
+    return { points, next_offset: next ?? null };
+  }
+
+  async count(
+    collection: string,
+    opts?: { filter?: QdrantFilter; exact?: boolean },
+  ): Promise<number> {
+    const out = await this.requestJson<any>(
+      `/collections/${encodeURIComponent(collection)}/points/count`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          filter: opts?.filter,
+          exact: opts?.exact ?? true,
+        }),
+      },
+    );
+    const n = out?.result?.count ?? out?.count ?? 0;
+    return typeof n === "number" ? n : 0;
   }
 }
