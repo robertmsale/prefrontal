@@ -28,6 +28,24 @@ Defaults:
 - Qdrant: `http://127.0.0.1:6333`
 - Ollama: `http://127.0.0.1:11434` using `mxbai-embed-large`
 
+## Project identity (worktree-safe)
+
+By default, the MCP server derives a per-repo Qdrant prefix from your git
+repository’s **common git dir**, so starting the server from any worktree
+directory (even sibling worktrees outside the repo root) still shares the same
+“brain”.
+
+Override behavior (highest priority first):
+
+- `PREFRONTAL_PROJECT_ID`: explicit project id / Qdrant prefix
+- `QDRANT_PREFIX`: explicit Qdrant prefix (legacy / fallback)
+
 ## Environment
 
 Copy `.env.example` to `.env` if you want to override defaults.
+
+## Human TUI client (read-only)
+
+```bash
+deno task tui
+```

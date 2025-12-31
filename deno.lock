@@ -4,7 +4,9 @@
     "jsr:@punkpeye/fastmcp@^3.22.0": "3.22.0",
     "jsr:@std/assert@1": "1.0.15",
     "jsr:@std/dotenv@~0.225.5": "0.225.5",
+    "jsr:@std/internal@^1.0.10": "1.0.12",
     "jsr:@std/internal@^1.0.12": "1.0.12",
+    "jsr:@std/path@^1.1.2": "1.1.2",
     "jsr:@zod/zod@^4.1.12": "4.1.12",
     "npm:@modelcontextprotocol/sdk@1.25.1": "1.25.1_zod@3.25.76_ajv@8.17.1_express@5.1.0",
     "npm:@modelcontextprotocol/sdk@^1.17.2": "1.20.2_express@5.1.0_zod@3.25.76",
@@ -38,7 +40,7 @@
     "@std/assert@1.0.15": {
       "integrity": "d64018e951dbdfab9777335ecdb000c0b4e3df036984083be219ce5941e4703b",
       "dependencies": [
-        "jsr:@std/internal"
+        "jsr:@std/internal@^1.0.12"
       ]
     },
     "@std/dotenv@0.225.5": {
@@ -46,6 +48,12 @@
     },
     "@std/internal@1.0.12": {
       "integrity": "972a634fd5bc34b242024402972cd5143eac68d8dffaca5eaa4dba30ce17b027"
+    },
+    "@std/path@1.1.2": {
+      "integrity": "c0b13b97dfe06546d5e16bf3966b1cadf92e1cc83e56ba5476ad8b498d9e3038",
+      "dependencies": [
+        "jsr:@std/internal@^1.0.10"
+      ]
     },
     "@zod/zod@4.1.12": {
       "integrity": "5876ed4c6d44673faf5120f0a461a2ada2eb6c735329d3ebaf5ba1fc08387695"
