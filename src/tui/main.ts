@@ -126,18 +126,35 @@ function parseToolJson<T>(result: any): T {
   return JSON.parse(txt) as T;
 }
 
-async function main() {
-  const flags = parseArgs(Deno.args);
+async function commandExists(command: string): Promise<boolean> {
+  try {
+    const p = new Deno.Command("bash", {
+      args: ["-lc", `command -v ${command} >/dev/null 2>&1`],
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+    });
+    const o = await p.output();
+    return o.success;
+  } catch {
+    return false;
+  }
+}
+
+export async function runTui(argv: string[] = Deno.args) {
+  const flags = parseArgs(argv);
 
   const serverCommand = flags.command ??
     Deno.env.get("PREFRONTAL_MCP_COMMAND") ??
-    "deno";
+    ((await commandExists("prefrontal")) ? "prefrontal" : "deno");
   const serverArgs = (() => {
     const fromFlag = flags.args ? tryParseJsonArray(flags.args) : null;
     if (fromFlag) return fromFlag;
     const fromEnv = Deno.env.get("PREFRONTAL_MCP_ARGS");
     const envArgs = fromEnv ? tryParseJsonArray(fromEnv) : null;
-    return envArgs ?? ["task", "dev"];
+    if (envArgs) return envArgs;
+    if (serverCommand === "prefrontal") return ["mcp", "--transport=stdio"];
+    return ["task", "dev"];
   })();
 
   const client = new Client({ name: "prefrontal-tui", version: "0.1.0" });
@@ -665,4 +682,6 @@ async function main() {
   write("\n");
 }
 
-await main();
+if (import.meta.main) {
+  await runTui(Deno.args);
+}

@@ -11,6 +11,7 @@
     "dev": "PREFRONTAL_TRANSPORT=stdio deno run -A src/server.ts",
     "serve": "PREFRONTAL_TRANSPORT=http deno run -A scripts/ensure_ollama_model.ts && deno run -A scripts/ensure_qdrant.ts && deno run -A src/server.ts",
     "start": "deno run -A src/server.ts",
+    "cli": "deno run -A src/cli/main.ts",
     "tui": "deno run --allow-run --allow-env src/tui/main.ts",
     "ensure:ollama": "deno run -A scripts/ensure_ollama_model.ts",
     "ensure:qdrant": "deno run -A scripts/ensure_qdrant.ts",

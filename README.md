@@ -28,6 +28,30 @@ Defaults:
 - Qdrant: `http://127.0.0.1:6333`
 - Ollama: `http://127.0.0.1:11434` using `mxbai-embed-large`
 
+## CLI (single entrypoint)
+
+Install into your PATH:
+
+```bash
+deno install -A -n prefrontal src/cli/main.ts
+```
+
+Examples (run from inside any repo/worktree to use that project’s scoped
+prefix):
+
+```bash
+prefrontal tui
+prefrontal mcp --transport=http
+prefrontal stats
+prefrontal memories search "smoke"
+```
+
+Codex `codex exec` MCP config example:
+
+```bash
+codex exec -c 'mcp_servers.prefrontal.command="prefrontal"' -c 'mcp_servers.prefrontal.args=["mcp","--transport=stdio"]' "{PROMPT}"
+```
+
 ## Project identity (worktree-safe)
 
 By default, the MCP server derives a per-repo Qdrant prefix from your git
