@@ -49,3 +49,26 @@ Copy `.env.example` to `.env` if you want to override defaults.
 ```bash
 deno task tui
 ```
+
+## npm / bun wrappers
+
+This repo is Deno-first, but you can also launch via npm or bun scripts:
+
+```bash
+npm run dev
+npm run serve
+npm run smoke
+npm run tui
+```
+
+```bash
+bun run dev
+bun run serve
+bun run smoke
+bun run tui
+```
+
+To smoke test a non-`deno` MCP launcher, set:
+
+- `PREFRONTAL_MCP_COMMAND` (e.g. `npm` or `bun`)
+- `PREFRONTAL_MCP_ARGS` (JSON array of args, e.g. `["run","dev","--silent"]`)

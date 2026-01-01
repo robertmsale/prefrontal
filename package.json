@@ -1,0 +1,17 @@
+{
+  "name": "prefrontal",
+  "private": true,
+  "type": "module",
+  "description": "Coordination blackboard + derived semantic index for agent swarms (Deno-run MCP server).",
+  "scripts": {
+    "dev": "deno task dev",
+    "serve": "deno task serve",
+    "smoke": "deno task smoke",
+    "tui": "deno task tui",
+    "ensure:ollama": "deno task ensure:ollama",
+    "ensure:qdrant": "deno task ensure:qdrant",
+    "fmt": "deno task fmt",
+    "check": "deno task check",
+    "test": "deno task test"
+  }
+}

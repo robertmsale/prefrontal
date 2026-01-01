@@ -13,6 +13,24 @@ const qdrantUrl =
 const qdrantPrefix = Deno.env.get("QDRANT_PREFIX") ?? env.QDRANT_PREFIX ??
   "prefrontal";
 
+function tryParseJsonArray(value: string): string[] | null {
+  try {
+    const v = JSON.parse(value);
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+const mcpCommand = Deno.env.get("PREFRONTAL_MCP_COMMAND") ??
+  env.PREFRONTAL_MCP_COMMAND ?? "deno";
+const mcpArgs = (() => {
+  const raw = Deno.env.get("PREFRONTAL_MCP_ARGS") ?? env.PREFRONTAL_MCP_ARGS;
+  const parsed = raw ? tryParseJsonArray(raw) : null;
+  return parsed ?? ["task", "dev"];
+})();
+
 const collections = {
   tasks: `${qdrantPrefix}_tasks`,
   locks: `${qdrantPrefix}_locks`,
@@ -130,12 +148,13 @@ async function ensureTooling() {
 }
 
 async function codexExec(prompt: string) {
+  const argsJson = JSON.stringify(mcpArgs);
   await run("codex", [
     "exec",
     "-c",
-    'mcp_servers.prefrontal.command="deno"',
+    `mcp_servers.prefrontal.command="${mcpCommand}"`,
     "-c",
-    'mcp_servers.prefrontal.args=["task","dev"]',
+    `mcp_servers.prefrontal.args=${argsJson}`,
     prompt,
   ]);
 }
