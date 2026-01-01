@@ -93,9 +93,38 @@ async function gitTopLevel(cwd: string): Promise<string | null> {
   }
 }
 
+async function gitWorktreeRoots(cwd: string): Promise<string[]> {
+  const roots = new Set<string>();
+  const top = await gitTopLevel(cwd);
+  if (top) roots.add(path.normalize(top));
+  try {
+    const cmd = new Deno.Command("git", {
+      cwd,
+      args: ["worktree", "list", "--porcelain"],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "null",
+    });
+    const out = await cmd.output();
+    if (out.success) {
+      const text = new TextDecoder().decode(out.stdout);
+      for (const line of text.split("\n")) {
+        if (!line.startsWith("worktree ")) continue;
+        const wt = line.slice("worktree ".length).trim();
+        if (wt.length === 0) continue;
+        const abs = path.isAbsolute(wt) ? wt : path.resolve(cwd, wt);
+        roots.add(path.normalize(abs));
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return Array.from(roots);
+}
+
 function normalizeRepoPath(
   input: string,
-  repoRoot: string | null,
+  repoRoots: string[] | null,
 ): string {
   let s = input.trim();
   if (s.startsWith("file://")) {
@@ -107,22 +136,52 @@ function normalizeRepoPath(
   }
 
   // Convert absolute paths under this repo root into repo-relative paths.
-  if (repoRoot && path.isAbsolute(s)) {
+  if (repoRoots && path.isAbsolute(s)) {
     const abs = path.normalize(s);
-    const root = path.normalize(repoRoot);
-    const prefix = root.endsWith("/") || root.endsWith("\\")
-      ? root
-      : `${root}/`;
-    if (abs === root) return ".";
-    if (abs.startsWith(prefix)) {
-      const rel = path.relative(root, abs);
-      return rel.replaceAll("\\", "/").replace(/^\.\/+/, "");
+    for (const root of repoRoots) {
+      const prefix = root.endsWith("/") || root.endsWith("\\")
+        ? root
+        : `${root}/`;
+      if (abs === root) return ".";
+      if (abs.startsWith(prefix)) {
+        const rel = path.relative(root, abs);
+        return rel.replaceAll("\\", "/").replace(/^\.\/+/, "");
+      }
     }
   }
 
   // Keep relative paths stable.
   const norm = path.normalize(s).replaceAll("\\", "/");
   return norm.replace(/^\.\/+/, "");
+}
+
+function normalizePaths(
+  paths: string[] | null | undefined,
+  repoRoots: string[] | null,
+): string[] | undefined {
+  if (!paths) return undefined;
+  return paths.map((p) => normalizeRepoPath(p, repoRoots));
+}
+
+function normalizeTaskPaths(
+  task: z.infer<typeof TaskSchema>,
+  repoRoots: string[] | null,
+): z.infer<typeof TaskSchema> {
+  return {
+    ...task,
+    related_paths: normalizePaths(task.related_paths, repoRoots) ?? [],
+  };
+}
+
+function normalizeActivityPaths(
+  event: z.infer<typeof ActivityEventSchema>,
+  repoRoots: string[] | null,
+): z.infer<typeof ActivityEventSchema> {
+  const next = normalizePaths(event.related_paths, repoRoots);
+  return {
+    ...event,
+    related_paths: next,
+  };
 }
 
 export async function startPrefrontalMcpServer(
@@ -132,7 +191,8 @@ export async function startPrefrontalMcpServer(
   const collections = qdrantCollections(config.qdrantPrefix);
 
   const qdrant = new QdrantRestClient(config.qdrantUrl, config.qdrantApiKey);
-  const repoRoot = await gitTopLevel(Deno.cwd());
+  const repoRoots = await gitWorktreeRoots(Deno.cwd());
+  const repoRootsOrNull = repoRoots.length ? repoRoots : null;
 
   // Sanity check: embedding dimensionality must match collection schema.
   const dimProbe = await embedQuery(
@@ -258,21 +318,25 @@ export async function startPrefrontalMcpServer(
 
       const repoScan = await collectPaths(collections.repoChunks, (p, out) => {
         const v = p?.path;
-        if (typeof v === "string" && v.length > 0) out.add(v);
+        if (typeof v === "string" && v.length > 0) {
+          out.add(normalizeRepoPath(v, repoRootsOrNull));
+        }
       });
       const taskScan = await collectPaths(collections.tasks, (p, out) => {
         const v = p?.related_paths;
         if (Array.isArray(v)) {
           for (const x of v) {
             if (typeof x === "string" && x.length > 0) {
-              out.add(x);
+              out.add(normalizeRepoPath(x, repoRootsOrNull));
             }
           }
         }
       });
       const lockScan = await collectPaths(collections.locks, (p, out) => {
         const v = p?.path;
-        if (typeof v === "string" && v.length > 0) out.add(v);
+        if (typeof v === "string" && v.length > 0) {
+          out.add(normalizeRepoPath(v, repoRootsOrNull));
+        }
       });
       const activityScan = await collectPaths(
         collections.activity,
@@ -281,7 +345,7 @@ export async function startPrefrontalMcpServer(
           if (Array.isArray(v)) {
             for (const x of v) {
               if (typeof x === "string" && x.length > 0) {
-                out.add(x);
+                out.add(normalizeRepoPath(x, repoRootsOrNull));
               }
             }
           }
@@ -316,12 +380,16 @@ export async function startPrefrontalMcpServer(
     description: "Append an activity event to the project digest stream.",
     parameters: ActivityPostParams,
     execute: async (args) => {
+      const relatedPaths = normalizePaths(
+        args.related_paths ?? undefined,
+        repoRootsOrNull,
+      );
       const event = ActivityEventSchema.parse({
         event_id: crypto.randomUUID(),
         ts: nowMs(),
         type: args.type,
         message: args.message,
-        related_paths: args.related_paths ?? undefined,
+        related_paths: relatedPaths ?? undefined,
         task_id: args.task_id ?? undefined,
       });
 
@@ -352,8 +420,13 @@ export async function startPrefrontalMcpServer(
       const events = points.map((p) => p.payload).filter(Boolean).map((
         p: any,
       ) => ActivityEventSchema.parse(p));
-      const nextCursor = events.length ? events[events.length - 1].ts : since;
-      return ok({ events, next_cursor: nextCursor });
+      const normalized = events.map((e) =>
+        normalizeActivityPaths(e, repoRootsOrNull)
+      );
+      const nextCursor = normalized.length
+        ? normalized[normalized.length - 1].ts
+        : since;
+      return ok({ events: normalized, next_cursor: nextCursor });
     },
   });
 
@@ -364,8 +437,11 @@ export async function startPrefrontalMcpServer(
     parameters: TasksCreateParams,
     execute: async (args) => {
       const taskId = crypto.randomUUID();
+      const relatedPaths =
+        normalizePaths(args.related_paths, repoRootsOrNull) ??
+          [];
       const taskText = `${args.title}\n${args.description}\n${
-        args.related_paths.join("\n")
+        relatedPaths.join("\n")
       }`;
       const vec = await embedDocument(
         config.ollamaUrl,
@@ -379,7 +455,7 @@ export async function startPrefrontalMcpServer(
         description: args.description,
         status: "open" as TaskStatus,
         claimed_by: null,
-        related_paths: args.related_paths,
+        related_paths: relatedPaths,
         base_commit: args.base_commit ?? undefined,
         last_update_at: nowMs(),
         lease_until: null,
@@ -430,7 +506,7 @@ export async function startPrefrontalMcpServer(
         with_vectors: false,
       });
       const tasks = points.map((p) => p.payload).filter(Boolean).map((p: any) =>
-        TaskSchema.parse(p)
+        normalizeTaskPaths(TaskSchema.parse(p), repoRootsOrNull)
       );
       return ok({ tasks });
     },
@@ -456,7 +532,7 @@ export async function startPrefrontalMcpServer(
       }, true);
       const results = hits.map((h: any) => ({
         score: h.score,
-        task: TaskSchema.parse(h.payload),
+        task: normalizeTaskPaths(TaskSchema.parse(h.payload), repoRootsOrNull),
       }));
       return ok({ results });
     },
@@ -467,7 +543,7 @@ export async function startPrefrontalMcpServer(
     if (!pts.length) return null;
     const payload = pts[0].payload;
     if (!payload) return null;
-    return TaskSchema.parse(payload);
+    return normalizeTaskPaths(TaskSchema.parse(payload), repoRootsOrNull);
   }
 
   server.addTool({
@@ -565,7 +641,12 @@ export async function startPrefrontalMcpServer(
         last_update_at: nowMs(),
       };
       if (args.status) patch.status = args.status;
-      if (args.related_paths) patch.related_paths = args.related_paths;
+      if (args.related_paths) {
+        patch.related_paths = normalizePaths(
+          args.related_paths,
+          repoRootsOrNull,
+        );
+      }
       if (typeof nextLease !== "undefined") patch.lease_until = nextLease;
 
       await qdrant.setPayload(collections.tasks, patch, {
@@ -589,7 +670,7 @@ export async function startPrefrontalMcpServer(
             ts: nowMs(),
             type: "task_progress",
             message: `${after.title}: ${args.progress_note}`,
-            related_paths: after.related_paths,
+            related_paths: normalizePaths(after.related_paths, repoRootsOrNull),
             task_id: after.task_id,
           },
         }], true).catch(() => {});
@@ -635,7 +716,7 @@ export async function startPrefrontalMcpServer(
           message: `${after.title}${
             args.result_commit ? ` (commit ${args.result_commit})` : ""
           }`,
-          related_paths: after.related_paths,
+          related_paths: normalizePaths(after.related_paths, repoRootsOrNull),
           task_id: after.task_id,
         },
       }], true).catch(() => {});
@@ -684,9 +765,9 @@ export async function startPrefrontalMcpServer(
         );
 
       for (const rawPath of args.paths) {
-        const repoPath = normalizeRepoPath(rawPath, repoRoot);
+        const repoPath = normalizeRepoPath(rawPath, repoRootsOrNull);
         const activeLocks = activeLocksAll.filter((l) =>
-          normalizeRepoPath(l.path, repoRoot) === repoPath
+          normalizeRepoPath(l.path, repoRootsOrNull) === repoPath
         );
 
         const blocking = activeLocks.find((l) =>
@@ -726,7 +807,7 @@ export async function startPrefrontalMcpServer(
           ts: nowMs(),
           type: "locks_acquire",
           message: `${args.agent_id} acquired ${args.mode} locks`,
-          related_paths: args.paths,
+          related_paths: normalizePaths(args.paths, repoRootsOrNull),
         },
       }], true).catch(() => {});
 
@@ -754,7 +835,7 @@ export async function startPrefrontalMcpServer(
       );
 
       for (const rawPath of args.paths) {
-        const repoPath = normalizeRepoPath(rawPath, repoRoot);
+        const repoPath = normalizeRepoPath(rawPath, repoRootsOrNull);
 
         // Release the canonical lock id (repo-relative path).
         const canonicalId = await stableUuid(
@@ -794,7 +875,7 @@ export async function startPrefrontalMcpServer(
         // whose normalized path matches, regardless of stored (absolute) path.
         const matches = activeLocks.filter((l) =>
           l.agent_id === args.agent_id &&
-          normalizeRepoPath(l.path, repoRoot) === repoPath
+          normalizeRepoPath(l.path, repoRootsOrNull) === repoPath
         );
         for (const held of matches) {
           const id = await stableUuid(`lock:${held.path}:${args.agent_id}`);
@@ -834,7 +915,7 @@ export async function startPrefrontalMcpServer(
         .filter((l: any) => l.expires_at > nowMs())
         .map((l: any) => ({
           ...l,
-          path: normalizeRepoPath(l.path, repoRoot),
+          path: normalizeRepoPath(l.path, repoRootsOrNull),
         }));
       return ok({ locks });
     },
@@ -849,13 +930,21 @@ export async function startPrefrontalMcpServer(
     execute: async (args) => {
       const points = [];
       for (const c of args.chunks) {
+        const normalizedChunk = {
+          ...c,
+          path: normalizeRepoPath(c.path, repoRootsOrNull),
+        };
         const vec = await embedDocument(
           config.ollamaUrl,
           config.ollamaModel,
-          c.text,
+          normalizedChunk.text,
         );
-        const id = await stableUuid(`repo_chunk:${c.chunk_id}`);
-        points.push({ id, vector: vec.vector, payload: c as any });
+        const id = await stableUuid(`repo_chunk:${normalizedChunk.chunk_id}`);
+        points.push({
+          id,
+          vector: vec.vector,
+          payload: normalizedChunk as any,
+        });
       }
       await qdrant.upsert(collections.repoChunks, points, true);
       return ok({ ok: true, upserted: points.length });
@@ -875,7 +964,10 @@ export async function startPrefrontalMcpServer(
       );
       const must: any[] = [];
       if (args.kind) must.push({ key: "kind", match: { value: args.kind } });
-      if (args.path) must.push({ key: "path", match: { value: args.path } });
+      if (args.path) {
+        const normalizedPath = normalizeRepoPath(args.path, repoRootsOrNull);
+        must.push({ key: "path", match: { value: normalizedPath } });
+      }
       const hits = await qdrant.search(
         collections.repoChunks,
         q.vector,
@@ -885,7 +977,14 @@ export async function startPrefrontalMcpServer(
       );
       const results = hits.map((h: any) => ({
         score: h.score,
-        chunk: h.payload,
+        chunk: h?.payload && typeof h.payload === "object"
+          ? {
+            ...h.payload,
+            path: typeof h.payload.path === "string"
+              ? normalizeRepoPath(h.payload.path, repoRootsOrNull)
+              : h.payload.path,
+          }
+          : h.payload,
       }));
       return ok({ results });
     },
@@ -897,6 +996,7 @@ export async function startPrefrontalMcpServer(
       "Retrieve chunks for a specific file path (optionally ranked by a query).",
     parameters: MemoryGetFileContextParams,
     execute: async (args) => {
+      const normalizedPath = normalizeRepoPath(args.path, repoRootsOrNull);
       if (args.query) {
         const q = await embedQuery(
           config.ollamaUrl,
@@ -907,20 +1007,40 @@ export async function startPrefrontalMcpServer(
           collections.repoChunks,
           q.vector,
           args.k,
-          { must: [{ key: "path", match: { value: args.path } }] },
+          { must: [{ key: "path", match: { value: normalizedPath } }] },
           true,
         );
         return ok({
-          results: hits.map((h: any) => ({ score: h.score, chunk: h.payload })),
+          results: hits.map((h: any) => ({
+            score: h.score,
+            chunk: h?.payload && typeof h.payload === "object"
+              ? {
+                ...h.payload,
+                path: typeof h.payload.path === "string"
+                  ? normalizeRepoPath(h.payload.path, repoRootsOrNull)
+                  : h.payload.path,
+              }
+              : h.payload,
+          })),
         });
       }
       const points = await qdrant.scroll(collections.repoChunks, {
         limit: args.k,
-        filter: { must: [{ key: "path", match: { value: args.path } }] },
+        filter: { must: [{ key: "path", match: { value: normalizedPath } }] },
         with_payload: true,
         with_vectors: false,
       });
-      return ok({ results: points.map((p) => p.payload) });
+      const results = points.map((p) => p.payload).map((payload: any) =>
+        payload && typeof payload === "object"
+          ? {
+            ...payload,
+            path: typeof payload.path === "string"
+              ? normalizeRepoPath(payload.path, repoRootsOrNull)
+              : payload.path,
+          }
+          : payload
+      );
+      return ok({ results });
     },
   });
 
