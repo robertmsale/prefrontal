@@ -6,6 +6,7 @@ import {
   getDefaultEnvironment,
   StdioClientTransport,
 } from "npm:@modelcontextprotocol/sdk@1.25.1/client/stdio.js";
+import { stringify as yamlStringify } from "npm:yaml";
 import { fromFileUrl, join } from "@std/path";
 
 type TransportMode = "auto" | "stdio" | "http";
@@ -20,6 +21,49 @@ function out(line: string) {
 
 function err(line: string) {
   Deno.stderr.writeSync(enc.encode(line.endsWith("\n") ? line : line + "\n"));
+}
+
+const timeKeys = new Set([
+  "ts",
+  "last_update_at",
+  "lease_until",
+  "expires_at",
+  "window_ends_at",
+  "stale_before_ts",
+]);
+
+function isTimeKey(key: string): boolean {
+  const k = key.toLowerCase();
+  return timeKeys.has(k) || k.endsWith("_at") || k.endsWith("_ts");
+}
+
+function humanizeDates(value: unknown, keyHint?: string): unknown {
+  if (Array.isArray(value)) return value.map((v) => humanizeDates(v));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = humanizeDates(v, k);
+    }
+    return out;
+  }
+  if (typeof value === "number") {
+    const looksLikeMs = value > 100_000_000_000;
+    if ((keyHint && (isTimeKey(keyHint) || looksLikeMs)) ||
+      (!keyHint && looksLikeMs)) {
+      return new Date(value).toISOString();
+    }
+  }
+  return value;
+}
+
+function emit(data: unknown, flags?: Record<string, string>) {
+  const useHuman = flags && hasTrueFlag(flags, "human");
+  if (useHuman) {
+    const yaml = yamlStringify(humanizeDates(data)).trimEnd();
+    out(yaml);
+    return;
+  }
+  emit(data, flags);
 }
 
 function cleanEnv(v: string | undefined | null): string | null {
@@ -140,6 +184,9 @@ function usage() {
       "  prefrontal locks release <path...> --agent-id=...",
       "  prefrontal locks clear --agent-id=... [--path-prefix=...] [--limit=500]",
       "  prefrontal locks release-changed --agent-id=... [--base=HEAD~1] [--head=HEAD]",
+      "",
+      "Global flags:",
+      "  --human   Output YAML with human-readable datetime fields",
       "",
       "Env overrides:",
       "  PREFRONTAL_PROJECT_ID / QDRANT_PREFIX  (project scoping)",
@@ -284,7 +331,7 @@ function parseToolJson<T>(result: any): T {
   return JSON.parse(txt) as T;
 }
 
-async function cmdStats() {
+async function cmdStats(flags: Record<string, string>) {
   const data = await withMcpClient(async (client) => {
     const res = await client.callTool({
       name: "stats_get",
@@ -292,7 +339,7 @@ async function cmdStats() {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdMemoriesSearch(query: string, flags: Record<string, string>) {
@@ -317,7 +364,7 @@ async function cmdMemoriesSearch(query: string, flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdMemoriesFile(pathArg: string, flags: Record<string, string>) {
@@ -340,7 +387,7 @@ async function cmdMemoriesFile(pathArg: string, flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdMemoriesSearchInFile(
@@ -366,7 +413,7 @@ async function cmdMemoriesSearchInFile(
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdMemoriesUpsert(flags: Record<string, string>) {
@@ -414,7 +461,7 @@ async function cmdMemoriesUpsert(flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdTasksListActive(flags: Record<string, string>) {
@@ -428,7 +475,7 @@ async function cmdTasksListActive(flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdTasksCreate(flags: Record<string, string>) {
@@ -460,7 +507,7 @@ async function cmdTasksCreate(flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdTasksCreateAndClaim(flags: Record<string, string>) {
@@ -501,7 +548,7 @@ async function cmdTasksCreateAndClaim(flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdTasksClaim(taskId: string, flags: Record<string, string>) {
@@ -529,7 +576,7 @@ async function cmdTasksClaim(taskId: string, flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdTasksUpdate(taskId: string, flags: Record<string, string>) {
@@ -553,7 +600,7 @@ async function cmdTasksUpdate(taskId: string, flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdTasksComplete(taskId: string, flags: Record<string, string>) {
@@ -565,7 +612,7 @@ async function cmdTasksComplete(taskId: string, flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdTasksSearch(query: string, flags: Record<string, string>) {
@@ -579,7 +626,7 @@ async function cmdTasksSearch(query: string, flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdTasksSearchActive(query: string, flags: Record<string, string>) {
@@ -592,7 +639,7 @@ async function cmdTasksSearchActive(query: string, flags: Record<string, string>
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdActivityDigest(flags: Record<string, string>) {
@@ -619,7 +666,7 @@ async function cmdActivityDigest(flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdActivityPost(flags: Record<string, string>) {
@@ -645,7 +692,7 @@ async function cmdActivityPost(flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdActivityLatest(flags: Record<string, string>) {
@@ -661,7 +708,7 @@ async function cmdActivityLatest(flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdLocksList(flags: Record<string, string>) {
@@ -673,10 +720,14 @@ async function cmdLocksList(flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
-async function cmdLocksRelease(paths: string[], agentId: string) {
+async function cmdLocksRelease(
+  paths: string[],
+  agentId: string,
+  flags: Record<string, string>,
+) {
   if (!paths.length) return;
   const data = await withMcpClient(async (client) => {
     const res = await client.callTool({
@@ -685,7 +736,7 @@ async function cmdLocksRelease(paths: string[], agentId: string) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdLocksAcquire(paths: string[], flags: Record<string, string>) {
@@ -711,7 +762,7 @@ async function cmdLocksAcquire(paths: string[], flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdLocksClear(
@@ -727,7 +778,7 @@ async function cmdLocksClear(
     });
     return parseToolJson<any>(res);
   });
-  out(JSON.stringify(data, null, 2));
+  emit(data, flags);
 }
 
 async function cmdLocksReleaseChanged(flags: Record<string, string>) {
@@ -741,10 +792,10 @@ async function cmdLocksReleaseChanged(flags: Record<string, string>) {
   const head = flags.head ?? "HEAD";
   const paths = await gitNamesChanged(base, head);
   if (!paths.length) {
-    out(JSON.stringify({ ok: true, released: 0 }, null, 2));
+    emit({ ok: true, released: 0 }, flags);
     return;
   }
-  await cmdLocksRelease(paths, agentId);
+  await cmdLocksRelease(paths, agentId, flags);
 }
 
 async function cmdMcp(mode: TransportMode) {
@@ -780,7 +831,8 @@ async function main(argv: string[]) {
   }
 
   if (command === "stats") {
-    await cmdStats();
+    const { flags } = parseFlags(rest);
+    await cmdStats(flags);
     return;
   }
 
@@ -950,7 +1002,7 @@ async function main(argv: string[]) {
         err("Usage: prefrontal locks release <path...> --agent-id=...");
         Deno.exit(2);
       }
-      await cmdLocksRelease(positional, agentId);
+      await cmdLocksRelease(positional, agentId, flags);
       return;
     }
     if (sub === "clear") {
