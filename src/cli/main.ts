@@ -54,7 +54,17 @@ function tryParseJsonArray(value: string): string[] | null {
 function parseFlags(args: string[]) {
   const flags: Record<string, string> = {};
   const positional: string[] = [];
-  for (const a of args) {
+  let stopParsing = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (stopParsing) {
+      positional.push(a);
+      continue;
+    }
+    if (a === "--") {
+      stopParsing = true;
+      continue;
+    }
     if (!a.startsWith("--")) {
       positional.push(a);
       continue;
@@ -62,9 +72,16 @@ function parseFlags(args: string[]) {
     const eq = a.indexOf("=");
     if (eq !== -1) {
       flags[a.slice(2, eq)] = a.slice(eq + 1);
-    } else {
-      flags[a.slice(2)] = "true";
+      continue;
     }
+    const key = a.slice(2);
+    const next = args[i + 1];
+    if (typeof next === "string" && !next.startsWith("--")) {
+      flags[key] = next;
+      i++;
+      continue;
+    }
+    flags[key] = "true";
   }
   return { flags, positional };
 }
@@ -80,6 +97,10 @@ function usage() {
       "  prefrontal stats",
       "  prefrontal memories search <query> [--k=10] [--kind=...] [--path=...]",
       "  prefrontal memories file <path> [--query=...] [--k=10]",
+      "  prefrontal locks list [--limit=200]",
+      "  prefrontal locks release <path...> --agent-id=...",
+      "  prefrontal locks clear --agent-id=... [--path-prefix=...] [--limit=500]",
+      "  prefrontal locks release-changed --agent-id=... [--base=HEAD~1] [--head=HEAD]",
       "",
       "Env overrides:",
       "  PREFRONTAL_PROJECT_ID / QDRANT_PREFIX  (project scoping)",
@@ -87,6 +108,22 @@ function usage() {
       "  PREFRONTAL_MCP_COMMAND / PREFRONTAL_MCP_ARGS (CLI client launcher)",
     ].join("\n"),
   );
+}
+
+async function gitNamesChanged(base: string, head: string): Promise<string[]> {
+  const p = new Deno.Command("git", {
+    args: ["diff", "--name-only", `${base}..${head}`],
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const o = await p.output();
+  if (!o.success) {
+    const msg = new TextDecoder().decode(o.stderr).trim();
+    throw new Error(`git diff failed: ${msg || `exit ${o.code}`}`);
+  }
+  const txt = new TextDecoder().decode(o.stdout);
+  return txt.split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 async function ensureQdrantReachable(qdrantUrl: string) {
@@ -234,6 +271,76 @@ async function cmdMemoriesFile(pathArg: string, flags: Record<string, string>) {
   out(JSON.stringify(data, null, 2));
 }
 
+async function cmdLocksList(flags: Record<string, string>) {
+  const limit = Number(flags.limit ?? "200");
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "locks_list",
+      arguments: { limit },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdLocksRelease(paths: string[], agentId: string) {
+  if (!paths.length) return;
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "locks_release",
+      arguments: { paths, agent_id: agentId },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdLocksClear(
+  agentId: string,
+  flags: Record<string, string>,
+) {
+  const limit = Number(flags.limit ?? "500");
+  const prefix = flags["path-prefix"] ?? flags.path_prefix ?? null;
+
+  const locks = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "locks_list",
+      arguments: { limit },
+    });
+    const data = parseToolJson<{ locks: any[] }>(res);
+    return (data.locks ?? []) as any[];
+  });
+
+  const paths = locks
+    .filter((l) => l?.agent_id === agentId)
+    .map((l) => l?.path)
+    .filter((p): p is string => typeof p === "string" && p.length > 0)
+    .filter((p) => (prefix ? p.startsWith(prefix) : true));
+
+  if (!paths.length) {
+    out(JSON.stringify({ ok: true, released: 0 }, null, 2));
+    return;
+  }
+  await cmdLocksRelease(paths, agentId);
+}
+
+async function cmdLocksReleaseChanged(flags: Record<string, string>) {
+  const agentId = cleanEnv(flags["agent-id"] ?? flags.agent_id) ??
+    cleanEnv(Deno.env.get("PREFRONTAL_AGENT_ID"));
+  if (!agentId) {
+    err("Missing --agent-id (or set PREFRONTAL_AGENT_ID).");
+    Deno.exit(2);
+  }
+  const base = flags.base ?? "HEAD~1";
+  const head = flags.head ?? "HEAD";
+  const paths = await gitNamesChanged(base, head);
+  if (!paths.length) {
+    out(JSON.stringify({ ok: true, released: 0 }, null, 2));
+    return;
+  }
+  await cmdLocksRelease(paths, agentId);
+}
+
 async function cmdMcp(mode: TransportMode) {
   const cfg = await loadConfig();
   if (mode === "http") {
@@ -294,6 +401,50 @@ async function main(argv: string[]) {
       return;
     }
     err("Unknown memories subcommand (use: search, file)");
+    Deno.exit(2);
+  }
+
+  if (command === "locks") {
+    const [sub, ...tail] = rest;
+    if (sub === "list") {
+      const { flags } = parseFlags(tail);
+      await cmdLocksList(flags);
+      return;
+    }
+    if (sub === "release") {
+      const { flags, positional } = parseFlags(tail);
+      const agentId = cleanEnv(flags["agent-id"] ?? flags.agent_id) ??
+        cleanEnv(Deno.env.get("PREFRONTAL_AGENT_ID"));
+      if (!agentId) {
+        err("Missing --agent-id (or set PREFRONTAL_AGENT_ID).");
+        Deno.exit(2);
+      }
+      if (!positional.length) {
+        err("Usage: prefrontal locks release <path...> --agent-id=...");
+        Deno.exit(2);
+      }
+      await cmdLocksRelease(positional, agentId);
+      return;
+    }
+    if (sub === "clear") {
+      const { flags } = parseFlags(tail);
+      const agentId = cleanEnv(flags["agent-id"] ?? flags.agent_id) ??
+        cleanEnv(Deno.env.get("PREFRONTAL_AGENT_ID"));
+      if (!agentId) {
+        err("Missing --agent-id (or set PREFRONTAL_AGENT_ID).");
+        Deno.exit(2);
+      }
+      await cmdLocksClear(agentId, flags);
+      return;
+    }
+    if (sub === "release-changed") {
+      const { flags } = parseFlags(tail);
+      await cmdLocksReleaseChanged(flags);
+      return;
+    }
+    err(
+      "Unknown locks subcommand (use: list, release, clear, release-changed)",
+    );
     Deno.exit(2);
   }
 

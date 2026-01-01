@@ -44,12 +44,34 @@ prefrontal tui
 prefrontal mcp --transport=http
 prefrontal stats
 prefrontal memories search "smoke"
+prefrontal locks list
 ```
 
 Codex `codex exec` MCP config example:
 
 ```bash
 codex exec -c 'mcp_servers.prefrontal.command="prefrontal"' -c 'mcp_servers.prefrontal.args=["mcp","--transport=stdio"]' "{PROMPT}"
+```
+
+## Locks automation (post-commit)
+
+Locks have TTLs, but you can also automatically clear locks after a successful
+commit.
+
+Recommended pattern:
+
+- Ensure your runner sets a stable `PREFRONTAL_AGENT_ID` per worktree/agent (so
+  the hook knows who to release).
+- Add a `post-commit` hook that releases locks for the files changed in the
+  commit:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${PREFRONTAL_AGENT_ID:?PREFRONTAL_AGENT_ID must be set}"
+
+prefrontal locks release-changed --agent-id "$PREFRONTAL_AGENT_ID" --base HEAD~1 --head HEAD >/dev/null || true
 ```
 
 ## Project identity (worktree-safe)
