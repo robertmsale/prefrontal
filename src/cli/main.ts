@@ -6,6 +6,7 @@ import {
   getDefaultEnvironment,
   StdioClientTransport,
 } from "npm:@modelcontextprotocol/sdk@1.25.1/client/stdio.js";
+import { fromFileUrl, join } from "@std/path";
 
 type TransportMode = "auto" | "stdio" | "http";
 
@@ -26,19 +27,20 @@ function cleanEnv(v: string | undefined | null): string | null {
   return t.length ? t : null;
 }
 
-async function commandExists(command: string): Promise<boolean> {
-  try {
-    const p = new Deno.Command("bash", {
-      args: ["-lc", `command -v ${command} >/dev/null 2>&1`],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    });
-    const o = await p.output();
-    return o.success;
-  } catch {
-    return false;
+async function findExecutableInPath(command: string): Promise<string | null> {
+  const envPath = Deno.env.get("PATH") ?? "";
+  const delimiter = Deno.build.os === "windows" ? ";" : ":";
+  for (const dir of envPath.split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, command);
+    try {
+      const stat = await Deno.stat(candidate);
+      if (stat.isFile) return candidate;
+    } catch {
+      // ignore
+    }
   }
+  return null;
 }
 
 function tryParseJsonArray(value: string): string[] | null {
@@ -178,6 +180,14 @@ async function ensureOllamaModel(ollamaUrl: string, model: string) {
   }
 }
 
+function selfModulePaths() {
+  const rootUrl = new URL("../../", import.meta.url);
+  return {
+    configPath: fromFileUrl(new URL("deno.json", rootUrl)),
+    cliPath: fromFileUrl(new URL("src/cli/main.ts", rootUrl)),
+  };
+}
+
 async function detectMcpLauncher(): Promise<Launcher> {
   const cmd = cleanEnv(Deno.env.get("PREFRONTAL_MCP_COMMAND"));
   const argsRaw = cleanEnv(Deno.env.get("PREFRONTAL_MCP_ARGS"));
@@ -186,12 +196,16 @@ async function detectMcpLauncher(): Promise<Launcher> {
     return { command: cmd, args: parsedArgs ?? ["mcp", "--transport=stdio"] };
   }
 
-  if (await commandExists("prefrontal")) {
-    return { command: "prefrontal", args: ["mcp", "--transport=stdio"] };
+  const prefrontalPath = await findExecutableInPath("prefrontal");
+  if (prefrontalPath) {
+    return { command: prefrontalPath, args: ["mcp", "--transport=stdio"] };
   }
 
-  // Repo-local fallback (useful when running from the prefrontal repo without installing).
-  return { command: "deno", args: ["task", "dev"] };
+  const { configPath, cliPath } = selfModulePaths();
+  return {
+    command: Deno.execPath(),
+    args: ["run", "-A", "-c", configPath, cliPath, "mcp", "--transport=stdio"],
+  };
 }
 
 async function withMcpClient<T>(

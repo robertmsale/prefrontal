@@ -3,6 +3,7 @@ import {
   getDefaultEnvironment,
   StdioClientTransport,
 } from "npm:@modelcontextprotocol/sdk@1.25.1/client/stdio.js";
+import { fromFileUrl, join } from "@std/path";
 
 type View =
   | "overview"
@@ -126,19 +127,28 @@ function parseToolJson<T>(result: any): T {
   return JSON.parse(txt) as T;
 }
 
-async function commandExists(command: string): Promise<boolean> {
-  try {
-    const p = new Deno.Command("bash", {
-      args: ["-lc", `command -v ${command} >/dev/null 2>&1`],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    });
-    const o = await p.output();
-    return o.success;
-  } catch {
-    return false;
+async function findExecutableInPath(command: string): Promise<string | null> {
+  const envPath = Deno.env.get("PATH") ?? "";
+  const delimiter = Deno.build.os === "windows" ? ";" : ":";
+  for (const dir of envPath.split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, command);
+    try {
+      const stat = await Deno.stat(candidate);
+      if (stat.isFile) return candidate;
+    } catch {
+      // ignore
+    }
   }
+  return null;
+}
+
+function selfModulePaths() {
+  const rootUrl = new URL("../../", import.meta.url);
+  return {
+    configPath: fromFileUrl(new URL("deno.json", rootUrl)),
+    cliPath: fromFileUrl(new URL("src/cli/main.ts", rootUrl)),
+  };
 }
 
 export async function runTui(argv: string[] = Deno.args) {
@@ -146,7 +156,7 @@ export async function runTui(argv: string[] = Deno.args) {
 
   const serverCommand = flags.command ??
     Deno.env.get("PREFRONTAL_MCP_COMMAND") ??
-    ((await commandExists("prefrontal")) ? "prefrontal" : "deno");
+    ((await findExecutableInPath("prefrontal")) ?? Deno.execPath());
   const serverArgs = (() => {
     const fromFlag = flags.args ? tryParseJsonArray(flags.args) : null;
     if (fromFlag) return fromFlag;
@@ -154,7 +164,8 @@ export async function runTui(argv: string[] = Deno.args) {
     const envArgs = fromEnv ? tryParseJsonArray(fromEnv) : null;
     if (envArgs) return envArgs;
     if (serverCommand === "prefrontal") return ["mcp", "--transport=stdio"];
-    return ["task", "dev"];
+    const { configPath, cliPath } = selfModulePaths();
+    return ["run", "-A", "-c", configPath, cliPath, "mcp", "--transport=stdio"];
   })();
 
   const client = new Client({ name: "prefrontal-tui", version: "0.1.0" });
