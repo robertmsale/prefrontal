@@ -24,6 +24,8 @@ type UiState = {
   overview: any | null;
   memoryQuery: string;
   memoryResults: any[] | null;
+  taskSearchQuery: string;
+  taskSearchResults: any[] | null;
   tasks: any[] | null;
   locks: any[] | null;
   activityCursor: number;
@@ -192,6 +194,8 @@ export async function runTui(argv: string[] = Deno.args) {
     overview: null,
     memoryQuery: "",
     memoryResults: null,
+    taskSearchQuery: "",
+    taskSearchResults: null,
     tasks: null,
     locks: null,
     activityCursor: 0,
@@ -253,6 +257,7 @@ export async function runTui(argv: string[] = Deno.args) {
     });
     const data = parseToolJson<{ tasks: any[] }>(res);
     state.tasks = data.tasks ?? [];
+    state.taskSearchResults = null;
     state.status = "ready";
     queueRepaint();
   }
@@ -300,6 +305,22 @@ export async function runTui(argv: string[] = Deno.args) {
     const data = parseToolJson<{ results: any[] }>(res);
     state.memoryQuery = query;
     state.memoryResults = data.results ?? [];
+    state.status = "ready";
+    queueRepaint();
+  }
+
+  async function runTaskSearch(query: string) {
+    state.status = "searching tasks…";
+    state.error = null;
+    queueRepaint();
+    const res = await client.callTool({
+      name: "tasks_search_active",
+      arguments: { query, k: 10, limit: 100 },
+    });
+    const data = parseToolJson<{ results: any[]; tasks: any[] }>(res);
+    state.taskSearchQuery = query;
+    state.taskSearchResults = data.results ?? [];
+    state.tasks = data.tasks ?? state.tasks;
     state.status = "ready";
     queueRepaint();
   }
@@ -386,6 +407,15 @@ export async function runTui(argv: string[] = Deno.args) {
       return;
     }
 
+    if (ch === "/" && state.view === "tasks") {
+      promptInput("Task search", state.taskSearchQuery, async (v) => {
+        const q = v.trim();
+        if (q.length === 0) return;
+        await runTaskSearch(q);
+      });
+      return;
+    }
+
     if (ch === "n" && state.view === "activity") {
       try {
         await refreshActivity(true);
@@ -429,7 +459,7 @@ export async function runTui(argv: string[] = Deno.args) {
       dim(
         `Server: ${s.serverCommand} ${
           s.serverArgs.join(" ")
-        }    Keys: 1-6 views, r refresh, / search (memory), n next (activity), q quit, ? help`,
+        }    Keys: 1-6 views, r refresh, / search (memory/tasks), n next (activity), q quit, ? help`,
       ) + "\n\n",
     );
 
@@ -452,6 +482,9 @@ export async function runTui(argv: string[] = Deno.args) {
       lines.push("");
       lines.push(bold("Memory"));
       lines.push("  / enter query, Enter to search");
+      lines.push("");
+      lines.push(bold("Tasks"));
+      lines.push("  / enter query/path, Enter to search");
       lines.push("");
       lines.push(bold("Activity"));
       lines.push("  n fetch next page (uses cursor)");
@@ -544,7 +577,37 @@ export async function runTui(argv: string[] = Deno.args) {
 
     if (s.view === "tasks") {
       const t = s.tasks;
-      if (!t) {
+      if (s.taskSearchResults !== null) {
+        lines.push(
+          `${bold("Query")}: ${
+            s.taskSearchQuery ? s.taskSearchQuery : dim("(none)")
+          }  ${dim("(r to refresh active list)")}`,
+        );
+        lines.push("");
+        const r = s.taskSearchResults;
+        if (!r.length) {
+          lines.push(dim("No task hits."));
+        } else {
+          lines.push(bold(`Search results (${r.length})`));
+          for (const hit of r) {
+            const score = typeof hit?.score === "number"
+              ? hit.score.toFixed(3)
+              : "?";
+            const task = hit?.task ?? {};
+            const id = typeof task?.task_id === "string" ? task.task_id : "";
+            const title = typeof task?.title === "string" ? task.title : "";
+            const status = typeof task?.status === "string" ? task.status : "";
+            const who = task?.claimed_by?.agent_id
+              ? ` @${task.claimed_by.agent_id}`
+              : "";
+            lines.push(
+              `  ${dim(score)} ${cyan(truncate(id, 8))} ${bold(status)}${who} ${
+                truncate(title, Math.max(10, cols - 30))
+              }`,
+            );
+          }
+        }
+      } else if (!t) {
         lines.push(dim("Press r to load active tasks."));
       } else if (!t.length) {
         lines.push(dim("No active tasks."));

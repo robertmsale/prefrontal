@@ -53,6 +53,14 @@ function tryParseJsonArray(value: string): string[] | null {
   }
 }
 
+function parseStatusList(value: string | undefined): string[] | null {
+  if (!value) return null;
+  const json = tryParseJsonArray(value);
+  if (json) return json;
+  const items = value.split(",").map((s) => s.trim()).filter(Boolean);
+  return items.length ? items : null;
+}
+
 function parseFlags(args: string[]) {
   const flags: Record<string, string> = {};
   const positional: string[] = [];
@@ -99,6 +107,8 @@ function usage() {
       "  prefrontal stats",
       "  prefrontal memories search <query> [--k=10] [--kind=...] [--path=...]",
       "  prefrontal memories file <path> [--query=...] [--k=10]",
+      "  prefrontal tasks list-active [--limit=100] [--status-in=open,claimed,in_progress,blocked]",
+      "  prefrontal activity digest [--limit=50] [--since-cursor=...] [--direction=asc|desc] [--type=...] [--path-prefix=...]",
       "  prefrontal locks list [--limit=200]",
       "  prefrontal locks release <path...> --agent-id=...",
       "  prefrontal locks clear --agent-id=... [--path-prefix=...] [--limit=500]",
@@ -285,6 +295,47 @@ async function cmdMemoriesFile(pathArg: string, flags: Record<string, string>) {
   out(JSON.stringify(data, null, 2));
 }
 
+async function cmdTasksListActive(flags: Record<string, string>) {
+  const limit = Number(flags.limit ?? "100");
+  const statusRaw = flags["status-in"] ?? flags.status_in;
+  const statusIn = parseStatusList(statusRaw ?? undefined);
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "tasks_list_active",
+      arguments: { status_in: statusIn ?? null, limit },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdActivityDigest(flags: Record<string, string>) {
+  const limit = Number(flags.limit ?? "50");
+  const sinceRaw = flags["since-cursor"] ?? flags.since_cursor ?? null;
+  const sinceCursor = sinceRaw === null ? null : Number(sinceRaw);
+  const direction = flags.direction ? flags.direction.toLowerCase() : null;
+  const type = flags.type ?? null;
+  const pathPrefix = flags["path-prefix"] ?? flags.path_prefix ?? null;
+  if (direction && !["asc", "desc"].includes(direction)) {
+    err("Invalid --direction (use asc|desc).");
+    Deno.exit(2);
+  }
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "activity_digest",
+      arguments: {
+        since_cursor: Number.isFinite(sinceCursor) ? sinceCursor : null,
+        direction,
+        type,
+        related_path_prefix: pathPrefix,
+        limit,
+      },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
 async function cmdLocksList(flags: Record<string, string>) {
   const limit = Number(flags.limit ?? "200");
   const data = await withMcpClient(async (client) => {
@@ -315,27 +366,14 @@ async function cmdLocksClear(
 ) {
   const limit = Number(flags.limit ?? "500");
   const prefix = flags["path-prefix"] ?? flags.path_prefix ?? null;
-
-  const locks = await withMcpClient(async (client) => {
+  const data = await withMcpClient(async (client) => {
     const res = await client.callTool({
-      name: "locks_list",
-      arguments: { limit },
+      name: "locks_release_all",
+      arguments: { agent_id: agentId, path_prefix: prefix, limit },
     });
-    const data = parseToolJson<{ locks: any[] }>(res);
-    return (data.locks ?? []) as any[];
+    return parseToolJson<any>(res);
   });
-
-  const paths = locks
-    .filter((l) => l?.agent_id === agentId)
-    .map((l) => l?.path)
-    .filter((p): p is string => typeof p === "string" && p.length > 0)
-    .filter((p) => (prefix ? p.startsWith(prefix) : true));
-
-  if (!paths.length) {
-    out(JSON.stringify({ ok: true, released: 0 }, null, 2));
-    return;
-  }
-  await cmdLocksRelease(paths, agentId);
+  out(JSON.stringify(data, null, 2));
 }
 
 async function cmdLocksReleaseChanged(flags: Record<string, string>) {
@@ -415,6 +453,28 @@ async function main(argv: string[]) {
       return;
     }
     err("Unknown memories subcommand (use: search, file)");
+    Deno.exit(2);
+  }
+
+  if (command === "tasks") {
+    const [sub, ...tail] = rest;
+    if (sub === "list-active") {
+      const { flags } = parseFlags(tail);
+      await cmdTasksListActive(flags);
+      return;
+    }
+    err("Unknown tasks subcommand (use: list-active)");
+    Deno.exit(2);
+  }
+
+  if (command === "activity") {
+    const [sub, ...tail] = rest;
+    if (sub === "digest") {
+      const { flags } = parseFlags(tail);
+      await cmdActivityDigest(flags);
+      return;
+    }
+    err("Unknown activity subcommand (use: digest)");
     Deno.exit(2);
   }
 

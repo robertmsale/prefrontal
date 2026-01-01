@@ -63,6 +63,9 @@ export const ActivityEventSchema = z.object({
   ts: z.number().int().describe("Unix timestamp in milliseconds for ordering."),
   type: z.string().describe("Event type identifier."),
   message: z.string().describe("Human-readable event message."),
+  agent_id: z.string().optional().describe(
+    "Optional agent identifier associated with the event.",
+  ),
   related_paths: z.array(z.string().min(1)).optional().describe(
     "Optional related repo paths.",
   ),
@@ -116,7 +119,16 @@ export const ActivityPostParams = z.object({
 
 export const ActivityDigestParams = z.object({
   since_cursor: z.number().int().nullable().describe(
-    "Return events strictly after this cursor (ms), or null for start.",
+    "Cursor timestamp in ms (after for asc, before for desc), or null.",
+  ),
+  direction: z.enum(["asc", "desc"]).nullable().describe(
+    "Sort direction for results, or null for asc.",
+  ),
+  type: z.string().min(1).nullable().describe(
+    "Optional type filter, or null.",
+  ),
+  related_path_prefix: z.string().min(1).nullable().describe(
+    "Optional related_paths prefix filter, or null.",
   ),
   limit: z.number().int().min(1).max(200).describe(
     "Maximum number of events to return.",
@@ -135,6 +147,29 @@ export const TasksCreateParams = z.object({
   ),
   base_commit: z.string().min(1).nullable().describe(
     "Base commit SHA, or null.",
+  ),
+}).strict();
+
+export const TasksCreateAndClaimParams = z.object({
+  title: z.string().min(1).describe("Short task title."),
+  description: z.string().min(1).describe("Task description."),
+  related_paths: z.array(z.string().min(1)).describe(
+    "Best-effort list of related repo paths.",
+  ),
+  priority: z.number().int().nullable().describe("Optional priority, or null."),
+  tags: z.array(z.string().min(1)).nullable().describe(
+    "Optional tags, or null.",
+  ),
+  base_commit: z.string().min(1).nullable().describe(
+    "Base commit SHA, or null.",
+  ),
+  agent_id: z.string().min(1).describe("Agent identifier claiming the task."),
+  worktree: z.string().min(1).nullable().describe(
+    "Worktree name/path, or null.",
+  ),
+  branch: z.string().min(1).nullable().describe("Branch name, or null."),
+  lease_seconds: z.number().int().min(30).max(60 * 60 * 24).describe(
+    "Lease duration in seconds.",
   ),
 }).strict();
 
@@ -168,6 +203,16 @@ export const TasksSearchSimilarParams = z.object({
   ),
   k: z.number().int().min(1).max(50).describe(
     "Number of similar results to return.",
+  ),
+}).strict();
+
+export const TasksSearchActiveParams = z.object({
+  query: z.string().min(1).describe("Semantic query text."),
+  k: z.number().int().min(1).max(50).describe(
+    "Number of similar results to return.",
+  ),
+  limit: z.number().int().min(1).max(200).describe(
+    "Maximum number of active tasks to return.",
   ),
 }).strict();
 
@@ -228,6 +273,18 @@ export const LocksReleaseParams = z.object({
   ),
 }).strict();
 
+export const LocksReleaseAllParams = z.object({
+  agent_id: z.string().min(1).describe(
+    "Agent identifier releasing the lock(s).",
+  ),
+  path_prefix: z.string().min(1).nullable().describe(
+    "Optional path prefix filter, or null.",
+  ),
+  limit: z.number().int().min(1).max(5000).nullable().describe(
+    "Maximum number of locks to scan, or null for default.",
+  ),
+}).strict();
+
 export const LocksListParams = z.object({
   limit: z.number().int().min(1).max(500).describe(
     "Maximum number of locks to return.",
@@ -244,6 +301,9 @@ export const MemorySearchParams = z.object({
   path: z.string().min(1).nullable().describe(
     "Optional exact path filter, or null.",
   ),
+  include_provenance: z.boolean().nullable().describe(
+    "Include a provenance summary string, or null.",
+  ),
   k: z.number().int().min(1).max(50).describe("Number of results to return."),
 }).strict();
 
@@ -253,6 +313,20 @@ export const MemoryGetFileContextParams = z.object({
   ),
   query: z.string().min(1).nullable().describe(
     "Optional semantic query to rank chunks, or null.",
+  ),
+  include_provenance: z.boolean().nullable().describe(
+    "Include a provenance summary string, or null.",
+  ),
+  k: z.number().int().min(1).max(50).describe("Number of results to return."),
+}).strict();
+
+export const MemorySearchInFileParams = z.object({
+  path: z.string().min(1).describe(
+    "Exact repo-relative path to search within.",
+  ),
+  query: z.string().min(1).describe("Semantic query text."),
+  include_provenance: z.boolean().nullable().describe(
+    "Include a provenance summary string, or null.",
   ),
   k: z.number().int().min(1).max(50).describe("Number of results to return."),
 }).strict();
@@ -266,5 +340,22 @@ export const StatsGetParams = z.object({
   ),
   sample_paths: z.number().int().min(0).max(50).nullable().describe(
     "Number of example paths to return, or null for default.",
+  ),
+  include_agent_stats: z.boolean().nullable().describe(
+    "Whether to include per-agent task/lock counts, or null for default.",
+  ),
+  locks_expiring_within_seconds: z.number().int().min(60).max(60 * 60 * 24)
+    .nullable().describe(
+      "Window for locks expiring soon in seconds, or null for default.",
+    ),
+  tasks_stale_after_seconds: z.number().int().min(60).max(60 * 60 * 24 * 30)
+    .nullable().describe(
+      "Staleness threshold for tasks in seconds, or null for default.",
+    ),
+}).strict();
+
+export const ActivityLatestByAgentParams = z.object({
+  agent_id: z.string().min(1).describe(
+    "Agent identifier to look up in activity events.",
   ),
 }).strict();

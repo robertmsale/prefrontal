@@ -212,6 +212,11 @@ export class QdrantRestClient {
       limit: number;
       offset?: unknown;
       filter?: QdrantFilter;
+      order_by?: string | {
+        key: string;
+        direction?: "asc" | "desc";
+        start_from?: number | string;
+      };
       with_payload?: boolean;
       with_vectors?: boolean;
     },
