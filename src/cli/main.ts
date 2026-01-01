@@ -53,12 +53,27 @@ function tryParseJsonArray(value: string): string[] | null {
   }
 }
 
-function parseStatusList(value: string | undefined): string[] | null {
+function parseStringList(value: string | undefined): string[] | null {
   if (!value) return null;
   const json = tryParseJsonArray(value);
   if (json) return json;
   const items = value.split(",").map((s) => s.trim()).filter(Boolean);
   return items.length ? items : null;
+}
+
+function parseOptionalInt(value: string | undefined): number | null {
+  if (!value) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+function hasTrueFlag(flags: Record<string, string>, ...keys: string[]) {
+  return keys.some((k) => Object.prototype.hasOwnProperty.call(flags, k));
+}
+
+function parseStatusList(value: string | undefined): string[] | null {
+  if (!value) return null;
+  return parseStringList(value);
 }
 
 function parseFlags(args: string[]) {
@@ -105,10 +120,22 @@ function usage() {
       "  prefrontal tui",
       "  prefrontal mcp [--transport=stdio|http|auto]",
       "  prefrontal stats",
-      "  prefrontal memories search <query> [--k=10] [--kind=...] [--path=...]",
-      "  prefrontal memories file <path> [--query=...] [--k=10]",
+      "  prefrontal memories search <query> [--k=10] [--kind=...] [--path=...] [--include-provenance]",
+      "  prefrontal memories file <path> [--query=...] [--k=10] [--include-provenance]",
+      "  prefrontal memories search-in-file <path> <query> [--k=10] [--include-provenance]",
+      "  prefrontal memories upsert --chunk-id=... --kind=... --path=... --text=... [--commit=...] [--authority=...] [--content-hash=...] [--start-line=...] [--end-line=...]",
+      "  prefrontal tasks create --title=... --description=... --related-paths=... [--priority=...] [--tags=...] [--base-commit=...]",
+      "  prefrontal tasks create-and-claim --title=... --description=... --related-paths=... --agent-id=... --lease-seconds=... [--worktree=...] [--branch=...] [--priority=...] [--tags=...] [--base-commit=...]",
+      "  prefrontal tasks claim <task_id> --agent-id=... --lease-seconds=... [--worktree=...] [--branch=...]",
+      "  prefrontal tasks update <task_id> [--status=...] [--progress-note=...] [--related-paths=...] [--lease-extend-seconds=...]",
+      "  prefrontal tasks complete <task_id> [--result-commit=...]",
       "  prefrontal tasks list-active [--limit=100] [--status-in=open,claimed,in_progress,blocked]",
+      "  prefrontal tasks search <query> [--k=10] [--status-in=...]",
+      "  prefrontal tasks search-active <query> [--k=10] [--limit=100]",
+      "  prefrontal activity post --type=... --message=... [--related-paths=...] [--task-id=...]",
       "  prefrontal activity digest [--limit=50] [--since-cursor=...] [--direction=asc|desc] [--type=...] [--path-prefix=...]",
+      "  prefrontal activity latest --agent-id=...",
+      "  prefrontal locks acquire <path...> --agent-id=... --ttl-seconds=... --mode=soft|hard",
       "  prefrontal locks list [--limit=200]",
       "  prefrontal locks release <path...> --agent-id=...",
       "  prefrontal locks clear --agent-id=... [--path-prefix=...] [--limit=500]",
@@ -272,10 +299,21 @@ async function cmdMemoriesSearch(query: string, flags: Record<string, string>) {
   const k = Number(flags.k ?? "10");
   const kind = flags.kind ?? null;
   const path = flags.path ?? null;
+  const includeProvenance = hasTrueFlag(
+    flags,
+    "include-provenance",
+    "include_provenance",
+  );
   const data = await withMcpClient(async (client) => {
     const res = await client.callTool({
       name: "memory_search",
-      arguments: { query, kind, path, k },
+      arguments: {
+        query,
+        kind,
+        path,
+        k,
+        include_provenance: includeProvenance ? true : null,
+      },
     });
     return parseToolJson<any>(res);
   });
@@ -285,10 +323,94 @@ async function cmdMemoriesSearch(query: string, flags: Record<string, string>) {
 async function cmdMemoriesFile(pathArg: string, flags: Record<string, string>) {
   const k = Number(flags.k ?? "10");
   const query = flags.query ?? null;
+  const includeProvenance = hasTrueFlag(
+    flags,
+    "include-provenance",
+    "include_provenance",
+  );
   const data = await withMcpClient(async (client) => {
     const res = await client.callTool({
       name: "memory_get_file_context",
-      arguments: { path: pathArg, query, k },
+      arguments: {
+        path: pathArg,
+        query,
+        k,
+        include_provenance: includeProvenance ? true : null,
+      },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdMemoriesSearchInFile(
+  pathArg: string,
+  query: string,
+  flags: Record<string, string>,
+) {
+  const k = Number(flags.k ?? "10");
+  const includeProvenance = hasTrueFlag(
+    flags,
+    "include-provenance",
+    "include_provenance",
+  );
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "memory_search_in_file",
+      arguments: {
+        path: pathArg,
+        query,
+        k,
+        include_provenance: includeProvenance ? true : null,
+      },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdMemoriesUpsert(flags: Record<string, string>) {
+  const chunkId = flags["chunk-id"] ?? flags.chunk_id ?? null;
+  const kind = flags.kind ?? null;
+  const path = flags.path ?? null;
+  const text = flags.text ?? null;
+  if (!chunkId || !kind || !path || !text) {
+    err(
+      "Missing required flags: --chunk-id, --kind, --path, --text",
+    );
+    Deno.exit(2);
+  }
+  const commit = flags.commit ?? null;
+  const authority = parseOptionalInt(flags.authority ?? undefined);
+  const contentHash = flags["content-hash"] ?? flags.content_hash ?? null;
+  const startLine = parseOptionalInt(flags["start-line"] ?? flags.start_line);
+  const endLine = parseOptionalInt(flags["end-line"] ?? flags.end_line);
+  const chunk = (startLine !== null || endLine !== null)
+    ? {
+      start_line: startLine,
+      end_line: endLine,
+      byte_start: null,
+      byte_end: null,
+    }
+    : null;
+
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "memory_upsert_chunks",
+      arguments: {
+        chunks: [
+          {
+            chunk_id: chunkId,
+            kind,
+            path,
+            commit,
+            authority,
+            content_hash: contentHash,
+            chunk,
+            text,
+          },
+        ],
+      },
     });
     return parseToolJson<any>(res);
   });
@@ -303,6 +425,170 @@ async function cmdTasksListActive(flags: Record<string, string>) {
     const res = await client.callTool({
       name: "tasks_list_active",
       arguments: { status_in: statusIn ?? null, limit },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdTasksCreate(flags: Record<string, string>) {
+  const title = flags.title ?? null;
+  const description = flags.description ?? null;
+  const relatedPaths = parseStringList(
+    flags["related-paths"] ?? flags.related_paths,
+  );
+  if (!title || !description || !relatedPaths) {
+    err(
+      "Usage: prefrontal tasks create --title=... --description=... --related-paths=...",
+    );
+    Deno.exit(2);
+  }
+  const priority = parseOptionalInt(flags.priority);
+  const tags = parseStringList(flags.tags);
+  const baseCommit = flags["base-commit"] ?? flags.base_commit ?? null;
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "tasks_create",
+      arguments: {
+        title,
+        description,
+        related_paths: relatedPaths,
+        priority,
+        tags,
+        base_commit: baseCommit,
+      },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdTasksCreateAndClaim(flags: Record<string, string>) {
+  const title = flags.title ?? null;
+  const description = flags.description ?? null;
+  const relatedPaths = parseStringList(
+    flags["related-paths"] ?? flags.related_paths,
+  );
+  const agentId = flags["agent-id"] ?? flags.agent_id ?? null;
+  const leaseSeconds = parseOptionalInt(flags["lease-seconds"] ??
+    flags.lease_seconds);
+  if (!title || !description || !relatedPaths || !agentId || !leaseSeconds) {
+    err(
+      "Usage: prefrontal tasks create-and-claim --title=... --description=... --related-paths=... --agent-id=... --lease-seconds=...",
+    );
+    Deno.exit(2);
+  }
+  const priority = parseOptionalInt(flags.priority);
+  const tags = parseStringList(flags.tags);
+  const baseCommit = flags["base-commit"] ?? flags.base_commit ?? null;
+  const worktree = flags.worktree ?? null;
+  const branch = flags.branch ?? null;
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "tasks_create_and_claim",
+      arguments: {
+        title,
+        description,
+        related_paths: relatedPaths,
+        priority,
+        tags,
+        base_commit: baseCommit,
+        agent_id: agentId,
+        worktree,
+        branch,
+        lease_seconds: leaseSeconds,
+      },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdTasksClaim(taskId: string, flags: Record<string, string>) {
+  const agentId = flags["agent-id"] ?? flags.agent_id ?? null;
+  const leaseSeconds = parseOptionalInt(flags["lease-seconds"] ??
+    flags.lease_seconds);
+  if (!agentId || !leaseSeconds) {
+    err(
+      "Usage: prefrontal tasks claim <task_id> --agent-id=... --lease-seconds=...",
+    );
+    Deno.exit(2);
+  }
+  const worktree = flags.worktree ?? null;
+  const branch = flags.branch ?? null;
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "tasks_claim",
+      arguments: {
+        task_id: taskId,
+        agent_id: agentId,
+        worktree,
+        branch,
+        lease_seconds: leaseSeconds,
+      },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdTasksUpdate(taskId: string, flags: Record<string, string>) {
+  const status = flags.status ?? null;
+  const progressNote = flags["progress-note"] ?? flags.progress_note ?? null;
+  const relatedPaths = parseStringList(
+    flags["related-paths"] ?? flags.related_paths,
+  );
+  const leaseExtend = parseOptionalInt(flags["lease-extend-seconds"] ??
+    flags.lease_extend_seconds);
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "tasks_update",
+      arguments: {
+        task_id: taskId,
+        status,
+        progress_note: progressNote,
+        related_paths: relatedPaths,
+        lease_extend_seconds: leaseExtend,
+      },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdTasksComplete(taskId: string, flags: Record<string, string>) {
+  const resultCommit = flags["result-commit"] ?? flags.result_commit ?? null;
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "tasks_complete",
+      arguments: { task_id: taskId, result_commit: resultCommit },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdTasksSearch(query: string, flags: Record<string, string>) {
+  const k = Number(flags.k ?? "10");
+  const statusRaw = flags["status-in"] ?? flags.status_in;
+  const statusIn = parseStatusList(statusRaw ?? undefined);
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "tasks_search_similar",
+      arguments: { query, status_in: statusIn ?? null, k },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdTasksSearchActive(query: string, flags: Record<string, string>) {
+  const k = Number(flags.k ?? "10");
+  const limit = Number(flags.limit ?? "100");
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "tasks_search_active",
+      arguments: { query, k, limit },
     });
     return parseToolJson<any>(res);
   });
@@ -336,6 +622,48 @@ async function cmdActivityDigest(flags: Record<string, string>) {
   out(JSON.stringify(data, null, 2));
 }
 
+async function cmdActivityPost(flags: Record<string, string>) {
+  const type = flags.type ?? null;
+  const message = flags.message ?? null;
+  if (!type || !message) {
+    err("Usage: prefrontal activity post --type=... --message=...");
+    Deno.exit(2);
+  }
+  const relatedPaths = parseStringList(
+    flags["related-paths"] ?? flags.related_paths,
+  );
+  const taskId = flags["task-id"] ?? flags.task_id ?? null;
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "activity_post",
+      arguments: {
+        type,
+        message,
+        related_paths: relatedPaths,
+        task_id: taskId,
+      },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdActivityLatest(flags: Record<string, string>) {
+  const agentId = flags["agent-id"] ?? flags.agent_id ?? null;
+  if (!agentId) {
+    err("Usage: prefrontal activity latest --agent-id=...");
+    Deno.exit(2);
+  }
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "activity_latest_by_agent",
+      arguments: { agent_id: agentId },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
 async function cmdLocksList(flags: Record<string, string>) {
   const limit = Number(flags.limit ?? "200");
   const data = await withMcpClient(async (client) => {
@@ -354,6 +682,32 @@ async function cmdLocksRelease(paths: string[], agentId: string) {
     const res = await client.callTool({
       name: "locks_release",
       arguments: { paths, agent_id: agentId },
+    });
+    return parseToolJson<any>(res);
+  });
+  out(JSON.stringify(data, null, 2));
+}
+
+async function cmdLocksAcquire(paths: string[], flags: Record<string, string>) {
+  const agentId = flags["agent-id"] ?? flags.agent_id ?? null;
+  const ttlSeconds = parseOptionalInt(flags["ttl-seconds"] ??
+    flags.ttl_seconds);
+  const mode = flags.mode ?? null;
+  if (!agentId || !ttlSeconds || !mode) {
+    err(
+      "Usage: prefrontal locks acquire <path...> --agent-id=... --ttl-seconds=... --mode=soft|hard",
+    );
+    Deno.exit(2);
+  }
+  const data = await withMcpClient(async (client) => {
+    const res = await client.callTool({
+      name: "locks_acquire",
+      arguments: {
+        paths,
+        agent_id: agentId,
+        ttl_seconds: ttlSeconds,
+        mode,
+      },
     });
     return parseToolJson<any>(res);
   });
@@ -452,7 +806,23 @@ async function main(argv: string[]) {
       await cmdMemoriesFile(p, flags);
       return;
     }
-    err("Unknown memories subcommand (use: search, file)");
+    if (sub === "search-in-file") {
+      const { flags, positional } = parseFlags(tail);
+      const p = positional[0];
+      const q = positional.slice(1).join(" ").trim();
+      if (!p || !q) {
+        err("Usage: prefrontal memories search-in-file <path> <query>");
+        Deno.exit(2);
+      }
+      await cmdMemoriesSearchInFile(p, q, flags);
+      return;
+    }
+    if (sub === "upsert") {
+      const { flags } = parseFlags(tail);
+      await cmdMemoriesUpsert(flags);
+      return;
+    }
+    err("Unknown memories subcommand (use: search, file, search-in-file, upsert)");
     Deno.exit(2);
   }
 
@@ -463,7 +833,69 @@ async function main(argv: string[]) {
       await cmdTasksListActive(flags);
       return;
     }
-    err("Unknown tasks subcommand (use: list-active)");
+    if (sub === "create") {
+      const { flags } = parseFlags(tail);
+      await cmdTasksCreate(flags);
+      return;
+    }
+    if (sub === "create-and-claim") {
+      const { flags } = parseFlags(tail);
+      await cmdTasksCreateAndClaim(flags);
+      return;
+    }
+    if (sub === "claim") {
+      const { flags, positional } = parseFlags(tail);
+      const taskId = positional[0];
+      if (!taskId) {
+        err("Usage: prefrontal tasks claim <task_id> --agent-id=... --lease-seconds=...");
+        Deno.exit(2);
+      }
+      await cmdTasksClaim(taskId, flags);
+      return;
+    }
+    if (sub === "update") {
+      const { flags, positional } = parseFlags(tail);
+      const taskId = positional[0];
+      if (!taskId) {
+        err("Usage: prefrontal tasks update <task_id> [--status=...] [--progress-note=...] [--related-paths=...] [--lease-extend-seconds=...]");
+        Deno.exit(2);
+      }
+      await cmdTasksUpdate(taskId, flags);
+      return;
+    }
+    if (sub === "complete") {
+      const { flags, positional } = parseFlags(tail);
+      const taskId = positional[0];
+      if (!taskId) {
+        err("Usage: prefrontal tasks complete <task_id> [--result-commit=...]");
+        Deno.exit(2);
+      }
+      await cmdTasksComplete(taskId, flags);
+      return;
+    }
+    if (sub === "search") {
+      const { flags, positional } = parseFlags(tail);
+      const q = positional.join(" ").trim();
+      if (!q) {
+        err("Usage: prefrontal tasks search <query>");
+        Deno.exit(2);
+      }
+      await cmdTasksSearch(q, flags);
+      return;
+    }
+    if (sub === "search-active") {
+      const { flags, positional } = parseFlags(tail);
+      const q = positional.join(" ").trim();
+      if (!q) {
+        err("Usage: prefrontal tasks search-active <query>");
+        Deno.exit(2);
+      }
+      await cmdTasksSearchActive(q, flags);
+      return;
+    }
+    err(
+      "Unknown tasks subcommand (use: list-active, create, create-and-claim, claim, update, complete, search, search-active)",
+    );
     Deno.exit(2);
   }
 
@@ -474,12 +906,33 @@ async function main(argv: string[]) {
       await cmdActivityDigest(flags);
       return;
     }
-    err("Unknown activity subcommand (use: digest)");
+    if (sub === "post") {
+      const { flags } = parseFlags(tail);
+      await cmdActivityPost(flags);
+      return;
+    }
+    if (sub === "latest") {
+      const { flags } = parseFlags(tail);
+      await cmdActivityLatest(flags);
+      return;
+    }
+    err("Unknown activity subcommand (use: digest, post, latest)");
     Deno.exit(2);
   }
 
   if (command === "locks") {
     const [sub, ...tail] = rest;
+    if (sub === "acquire") {
+      const { flags, positional } = parseFlags(tail);
+      if (!positional.length) {
+        err(
+          "Usage: prefrontal locks acquire <path...> --agent-id=... --ttl-seconds=... --mode=soft|hard",
+        );
+        Deno.exit(2);
+      }
+      await cmdLocksAcquire(positional, flags);
+      return;
+    }
     if (sub === "list") {
       const { flags } = parseFlags(tail);
       await cmdLocksList(flags);
@@ -517,7 +970,7 @@ async function main(argv: string[]) {
       return;
     }
     err(
-      "Unknown locks subcommand (use: list, release, clear, release-changed)",
+      "Unknown locks subcommand (use: acquire, list, release, clear, release-changed)",
     );
     Deno.exit(2);
   }
