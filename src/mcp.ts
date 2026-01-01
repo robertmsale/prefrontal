@@ -1,5 +1,6 @@
 import { FastMCP } from "@punkpeye/fastmcp";
 import { z } from "@zod/zod";
+import * as path from "@std/path";
 import { loadConfig } from "./config.ts";
 import { embedDocument, embedQuery } from "./ollama.ts";
 import { QdrantRestClient } from "./qdrant.ts";
@@ -73,6 +74,57 @@ function qdrantCollections(prefix: string) {
   };
 }
 
+async function gitTopLevel(cwd: string): Promise<string | null> {
+  try {
+    const cmd = new Deno.Command("git", {
+      cwd,
+      args: ["rev-parse", "--show-toplevel"],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "null",
+    });
+    const out = await cmd.output();
+    if (!out.success) return null;
+    const txt = new TextDecoder().decode(out.stdout).trim();
+    if (!txt) return null;
+    return path.resolve(cwd, txt);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRepoPath(
+  input: string,
+  repoRoot: string | null,
+): string {
+  let s = input.trim();
+  if (s.startsWith("file://")) {
+    try {
+      s = new URL(s).pathname;
+    } catch {
+      // ignore
+    }
+  }
+
+  // Convert absolute paths under this repo root into repo-relative paths.
+  if (repoRoot && path.isAbsolute(s)) {
+    const abs = path.normalize(s);
+    const root = path.normalize(repoRoot);
+    const prefix = root.endsWith("/") || root.endsWith("\\")
+      ? root
+      : `${root}/`;
+    if (abs === root) return ".";
+    if (abs.startsWith(prefix)) {
+      const rel = path.relative(root, abs);
+      return rel.replaceAll("\\", "/").replace(/^\.\/+/, "");
+    }
+  }
+
+  // Keep relative paths stable.
+  const norm = path.normalize(s).replaceAll("\\", "/");
+  return norm.replace(/^\.\/+/, "");
+}
+
 export async function startPrefrontalMcpServer(
   opts?: { transport?: TransportMode },
 ) {
@@ -80,6 +132,7 @@ export async function startPrefrontalMcpServer(
   const collections = qdrantCollections(config.qdrantPrefix);
 
   const qdrant = new QdrantRestClient(config.qdrantUrl, config.qdrantApiKey);
+  const repoRoot = await gitTopLevel(Deno.cwd());
 
   // Sanity check: embedding dimensionality must match collection schema.
   const dimProbe = await embedQuery(
@@ -609,20 +662,20 @@ export async function startPrefrontalMcpServer(
         }
       > = [];
 
-      for (const path of args.paths) {
-        const active = await qdrant.scroll(collections.locks, {
-          limit: 200,
-          filter: {
-            must: [
-              { key: "path", match: { value: path } },
-              { key: "expires_at", range: { gte: nowMs() } },
-            ],
-          },
-          with_payload: true,
-          with_vectors: false,
-        });
+      const now = nowMs();
+      // Keep this conservative; locks should be few. This lets us match legacy
+      // absolute-path locks and normalize cross-worktree.
+      const activeAll = await qdrant.scroll(collections.locks, {
+        limit: 500,
+        filter: {
+          must: [{ key: "expires_at", range: { gte: now } }],
+        },
+        with_payload: true,
+        with_vectors: false,
+      });
 
-        const activeLocks = active.map((p) => p.payload).filter(Boolean).map(
+      const activeLocksAll = activeAll.map((p) => p.payload).filter(Boolean)
+        .map(
           (p: any) => LockSchema.safeParse(p),
         ).filter((r) => r.success).map((r: any) =>
           r.data as z.infer<
@@ -630,12 +683,18 @@ export async function startPrefrontalMcpServer(
           >
         );
 
+      for (const rawPath of args.paths) {
+        const repoPath = normalizeRepoPath(rawPath, repoRoot);
+        const activeLocks = activeLocksAll.filter((l) =>
+          normalizeRepoPath(l.path, repoRoot) === repoPath
+        );
+
         const blocking = activeLocks.find((l) =>
           l.agent_id !== args.agent_id && l.mode === "hard"
         );
         if (args.mode === "hard" && blocking) {
           results.push({
-            path,
+            path: repoPath,
             ok: false,
             reason: "hard_locked",
             held_by: blocking.agent_id,
@@ -644,9 +703,9 @@ export async function startPrefrontalMcpServer(
           continue;
         }
 
-        const id = await stableUuid(`lock:${path}:${args.agent_id}`);
+        const id = await stableUuid(`lock:${repoPath}:${args.agent_id}`);
         const lock = LockSchema.parse({
-          path,
+          path: repoPath,
           agent_id: args.agent_id,
           mode: args.mode,
           expires_at: expiresAt,
@@ -656,7 +715,7 @@ export async function startPrefrontalMcpServer(
           [{ id, vector: [0], payload: lock as any }],
           true,
         );
-        results.push({ path, ok: true, expires_at: expiresAt });
+        results.push({ path: repoPath, ok: true, expires_at: expiresAt });
       }
 
       await qdrant.upsert(collections.activity, [{
@@ -681,38 +740,78 @@ export async function startPrefrontalMcpServer(
     parameters: LocksReleaseParams,
     execute: async (args) => {
       const results: Array<{ path: string; ok: boolean }> = [];
-      for (const path of args.paths) {
-        const id = await stableUuid(`lock:${path}:${args.agent_id}`);
-        const existing = await qdrant.retrieve(
+      const now = nowMs();
+      const activeAll = await qdrant.scroll(collections.locks, {
+        limit: 500,
+        filter: { must: [{ key: "expires_at", range: { gte: now } }] },
+        with_payload: true,
+        with_vectors: false,
+      });
+      const activeLocks = activeAll.map((p) => p.payload).filter(Boolean).map(
+        (p: any) => LockSchema.safeParse(p),
+      ).filter((r) => r.success).map((r: any) =>
+        r.data as z.infer<typeof LockSchema>
+      );
+
+      for (const rawPath of args.paths) {
+        const repoPath = normalizeRepoPath(rawPath, repoRoot);
+
+        // Release the canonical lock id (repo-relative path).
+        const canonicalId = await stableUuid(
+          `lock:${repoPath}:${args.agent_id}`,
+        );
+        const canonicalExisting = await qdrant.retrieve(
           collections.locks,
-          [id],
+          [canonicalId],
           true,
           false,
-        )
-          .catch(() => []);
-        const cur = existing.length ? existing[0]?.payload : null;
-        const parsed = cur ? LockSchema.safeParse(cur) : null;
-        const held = parsed?.success ? parsed.data : null;
-        if (!held) {
-          results.push({ path, ok: true });
-          continue;
+        ).catch(() => []);
+
+        const canonicalPayload = canonicalExisting.length
+          ? canonicalExisting[0]?.payload
+          : null;
+        const canonicalParsed = canonicalPayload
+          ? LockSchema.safeParse(canonicalPayload)
+          : null;
+        const canonicalHeld = canonicalParsed?.success
+          ? canonicalParsed.data
+          : null;
+        if (canonicalHeld && canonicalHeld.agent_id === args.agent_id) {
+          const released = LockSchema.parse({
+            path: canonicalHeld.path,
+            agent_id: args.agent_id,
+            mode: canonicalHeld.mode,
+            expires_at: 0,
+          });
+          await qdrant.upsert(
+            collections.locks,
+            [{ id: canonicalId, vector: [0], payload: released as any }],
+            true,
+          );
         }
-        if (held.agent_id !== args.agent_id) {
-          results.push({ path, ok: false });
-          continue;
-        }
-        const released = LockSchema.parse({
-          path,
-          agent_id: args.agent_id,
-          mode: held.mode,
-          expires_at: 0,
-        });
-        await qdrant.upsert(
-          collections.locks,
-          [{ id, vector: [0], payload: released as any }],
-          true,
+
+        // Backward-compat: release any existing lock records held by this agent
+        // whose normalized path matches, regardless of stored (absolute) path.
+        const matches = activeLocks.filter((l) =>
+          l.agent_id === args.agent_id &&
+          normalizeRepoPath(l.path, repoRoot) === repoPath
         );
-        results.push({ path, ok: true });
+        for (const held of matches) {
+          const id = await stableUuid(`lock:${held.path}:${args.agent_id}`);
+          const released = LockSchema.parse({
+            path: held.path,
+            agent_id: args.agent_id,
+            mode: held.mode,
+            expires_at: 0,
+          });
+          await qdrant.upsert(
+            collections.locks,
+            [{ id, vector: [0], payload: released as any }],
+            true,
+          );
+        }
+
+        results.push({ path: repoPath, ok: true });
       }
       return ok({ results });
     },
@@ -732,7 +831,11 @@ export async function startPrefrontalMcpServer(
       const locks = points.map((p) => p.payload).filter(Boolean).map((p: any) =>
         LockSchema.safeParse(p)
       ).filter((r) => r.success).map((r: any) => r.data)
-        .filter((l: any) => l.expires_at > nowMs());
+        .filter((l: any) => l.expires_at > nowMs())
+        .map((l: any) => ({
+          ...l,
+          path: normalizeRepoPath(l.path, repoRoot),
+        }));
       return ok({ locks });
     },
   });
