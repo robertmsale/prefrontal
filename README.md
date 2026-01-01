@@ -81,6 +81,13 @@ repository’s **common git dir**, so starting the server from any worktree
 directory (even sibling worktrees outside the repo root) still shares the same
 “brain”.
 
+## Path normalization (worktree-safe)
+
+All file paths stored in tasks, activity, memory, stats, and locks are
+normalized to **repo-relative paths**. Absolute paths are converted using git
+worktree roots, so the same file is represented consistently across different
+worktrees.
+
 Override behavior (highest priority first):
 
 - `PREFRONTAL_PROJECT_ID`: explicit project id / Qdrant prefix
