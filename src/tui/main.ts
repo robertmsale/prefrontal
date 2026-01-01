@@ -147,6 +147,7 @@ async function main() {
     cwd: Deno.cwd(),
     env: {
       ...getDefaultEnvironment(),
+      ...Deno.env.toObject(),
       PREFRONTAL_TRANSPORT: "stdio",
       PREFRONTAL_TRANSPORT_TYPE: "stdio",
     },

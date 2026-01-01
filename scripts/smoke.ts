@@ -1,8 +1,63 @@
 import { load } from "@std/dotenv";
+import * as path from "@std/path";
 
 type CountResult = { count: number };
 
 const env = await load({ export: true });
+
+function cleanEnv(v: string | undefined | null): string | null {
+  const t = (v ?? "").trim();
+  return t.length ? t : null;
+}
+
+async function runGit(
+  cwd: string,
+  args: string[],
+): Promise<{ ok: true; stdout: string } | { ok: false }> {
+  try {
+    const cmd = new Deno.Command("git", {
+      cwd,
+      args,
+      stdin: "null",
+      stdout: "piped",
+      stderr: "null",
+    });
+    const out = await cmd.output();
+    if (!out.success) return { ok: false };
+    return { ok: true, stdout: new TextDecoder().decode(out.stdout).trim() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(hash, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function slugify(input: string): string {
+  return input.toLowerCase().replaceAll(/[^a-z0-9]+/g, "_").replaceAll(
+    /^_+|_+$/g,
+    "",
+  ) || "repo";
+}
+
+async function deriveQdrantPrefixFromGit(cwd: string): Promise<string | null> {
+  const top = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+  const common = await runGit(cwd, ["rev-parse", "--git-common-dir"]);
+  if (!top.ok || !common.ok) return null;
+
+  const topLevel = path.resolve(cwd, top.stdout);
+  const commonDir = path.isAbsolute(common.stdout)
+    ? common.stdout
+    : path.resolve(cwd, common.stdout);
+  const commonAbs = path.normalize(commonDir);
+
+  const repoName = slugify(path.basename(topLevel));
+  const hash = (await sha256Hex(commonAbs)).slice(0, 12);
+  return `prefrontal_${repoName}_${hash}`;
+}
 
 const qdrantUrl =
   (Deno.env.get("QDRANT_URL") ?? env.QDRANT_URL ?? "http://127.0.0.1:6333")
@@ -10,8 +65,15 @@ const qdrantUrl =
       /\/+$/,
       "",
     );
-const qdrantPrefix = Deno.env.get("QDRANT_PREFIX") ?? env.QDRANT_PREFIX ??
-  "prefrontal";
+const explicitProjectId = cleanEnv(
+  Deno.env.get("PREFRONTAL_PROJECT_ID") ?? env.PREFRONTAL_PROJECT_ID,
+);
+const explicitQdrantPrefix = cleanEnv(
+  Deno.env.get("QDRANT_PREFIX") ?? env.QDRANT_PREFIX,
+);
+const derivedPrefix = await deriveQdrantPrefixFromGit(Deno.cwd());
+const qdrantPrefix = explicitProjectId ?? explicitQdrantPrefix ??
+  derivedPrefix ?? "prefrontal";
 
 function tryParseJsonArray(value: string): string[] | null {
   try {

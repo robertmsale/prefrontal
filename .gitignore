@@ -1,1 +1,3 @@
 **/.field_exec/
+node_modules/
+.env
