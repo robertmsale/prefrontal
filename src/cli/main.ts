@@ -66,6 +66,31 @@ function emit(data: unknown, flags?: Record<string, string>) {
   out(JSON.stringify(data, null, 2));
 }
 
+function memoryTextOnly(results: any[]) {
+  const groups: Array<
+    { path: string; items: Array<{ chunk_id: string | null; text: string }> }
+  > = [];
+  const seen = new Map<string, typeof groups[number]>();
+  for (const hit of results) {
+    const chunk = hit?.chunk ?? {};
+    const path = typeof chunk?.path === "string" && chunk.path.length
+      ? chunk.path
+      : "(unknown)";
+    let group = seen.get(path);
+    if (!group) {
+      group = { path, items: [] };
+      seen.set(path, group);
+      groups.push(group);
+    }
+    const chunkId = typeof chunk?.chunk_id === "string"
+      ? chunk.chunk_id
+      : null;
+    const text = typeof chunk?.text === "string" ? chunk.text : "";
+    group.items.push({ chunk_id: chunkId, text });
+  }
+  return { groups };
+}
+
 function cleanEnv(v: string | undefined | null): string | null {
   const t = (v ?? "").trim();
   return t.length ? t : null;
@@ -164,9 +189,9 @@ function usage() {
       "  prefrontal tui",
       "  prefrontal mcp [--transport=stdio|http|auto]",
       "  prefrontal stats",
-      "  prefrontal memories search <query> [--k=10] [--kind=...] [--path=...] [--include-provenance]",
+      "  prefrontal memories search <query> [--k=10] [--kind=...] [--path=...] [--include-provenance] [--text-only]",
       "  prefrontal memories file <path> [--query=...] [--k=10] [--include-provenance]",
-      "  prefrontal memories search-in-file <path> <query> [--k=10] [--include-provenance]",
+      "  prefrontal memories search-in-file <path> <query> [--k=10] [--include-provenance] [--text-only]",
       "  prefrontal memories upsert --chunk-id=... --kind=... --path=... --text=... [--commit=...] [--authority=...] [--content-hash=...] [--start-line=...] [--end-line=...]",
       "  prefrontal tasks create --title=... --description=... --related-paths=... [--priority=...] [--tags=...] [--base-commit=...]",
       "  prefrontal tasks create-and-claim --title=... --description=... --related-paths=... --agent-id=... --lease-seconds=... [--worktree=...] [--branch=...] [--priority=...] [--tags=...] [--base-commit=...]",
@@ -351,6 +376,7 @@ async function cmdMemoriesSearch(query: string, flags: Record<string, string>) {
     "include-provenance",
     "include_provenance",
   );
+  const textOnly = hasTrueFlag(flags, "text-only", "text_only");
   const data = await withMcpClient(async (client) => {
     const res = await client.callTool({
       name: "memory_search",
@@ -364,7 +390,7 @@ async function cmdMemoriesSearch(query: string, flags: Record<string, string>) {
     });
     return parseToolJson<any>(res);
   });
-  emit(data, flags);
+  emit(textOnly ? memoryTextOnly(data?.results ?? []) : data, flags);
 }
 
 async function cmdMemoriesFile(pathArg: string, flags: Record<string, string>) {
@@ -401,6 +427,7 @@ async function cmdMemoriesSearchInFile(
     "include-provenance",
     "include_provenance",
   );
+  const textOnly = hasTrueFlag(flags, "text-only", "text_only");
   const data = await withMcpClient(async (client) => {
     const res = await client.callTool({
       name: "memory_search_in_file",
@@ -413,7 +440,7 @@ async function cmdMemoriesSearchInFile(
     });
     return parseToolJson<any>(res);
   });
-  emit(data, flags);
+  emit(textOnly ? memoryTextOnly(data?.results ?? []) : data, flags);
 }
 
 async function cmdMemoriesUpsert(flags: Record<string, string>) {
