@@ -30,18 +30,12 @@ Defaults:
 
 ## Features & rationale
 
-Prefrontal exists to solve coordination drift in multi-agent (or multi-human)
-workflows: duplicated work, conflicting edits, and a lack of shared situational
-awareness across worktrees. It provides a single MCP server that acts as:
+Prefrontal exists to solve coordination drift in multi-agent (or multi-human) workflows: duplicated work, conflicting edits, and a lack of shared situational awareness across worktrees. It provides a single MCP server that acts as:
 
-- **Coordination blackboard**: tasks, locks, and activity events that let agents
-  claim work, avoid collisions, and understand what changed recently.
-- **Derived semantic index (“memory”)**: a fast, searchable map of repo/docs
-  chunks to locate relevant context without treating it as source of truth.
+- **Coordination blackboard**: tasks, locks, and activity events that let agents claim work, avoid collisions, and understand what changed recently.
+- **Derived semantic index (“memory”)**: a fast, searchable map of repo/docs chunks to locate relevant context without treating it as source of truth.
 
-The design intentionally separates **authoritative reality** (the repo and
-tracked docs) from **derived memory**, so agents can move quickly while still
-verifying decisions against real files.
+The design intentionally separates **authoritative reality** (the repo and tracked docs) from **derived memory**, so agents can move quickly while still verifying decisions against real files.
 
 ## CLI (single entrypoint)
 
@@ -51,8 +45,7 @@ Install into your PATH:
 deno install -A -n prefrontal src/cli/main.ts
 ```
 
-Examples (run from inside any repo/worktree to use that project’s scoped
-prefix):
+Examples (run from inside any repo/worktree to use that project’s scoped prefix):
 
 ```bash
 prefrontal tui
@@ -67,6 +60,48 @@ Codex `codex exec` MCP config example:
 ```bash
 codex exec -c 'mcp_servers.prefrontal.command="prefrontal"' -c 'mcp_servers.prefrontal.args=["mcp","--transport=stdio"]' "{PROMPT}"
 ```
+
+## Memories example
+
+Following `AGENTS.example.md`, if you ask your agent to create memories about that file, they will execute `memory_upsert_chunks` with some facts about that file. Executing `prefrontal memories search "agent" --human` will yield results like the following:
+```
+results:
+  - score: 0.43748978
+    chunk:
+      chunk_id: agents-example-usage-1
+      kind: guardrail
+      path: AGENTS.example.md
+      commit: null
+      authority: 2
+      content_hash: null
+      chunk:
+        start_line: 6
+        end_line: 20
+        byte_start: null
+        byte_end: null
+      text: "Memory is derived, never a source of truth for code facts; verify in repo
+        files. Authority order: repo reality, docs/FACTS.md, docs/adr/*,
+        everything else (including memory)."
+  - score: 0.42365688
+    chunk:
+      chunk_id: agents-example-usage-2
+      kind: guardrail
+      path: AGENTS.example.md
+      commit: null
+      authority: 2
+      content_hash: null
+      chunk:
+        start_line: 29
+        end_line: 60
+        byte_start: null
+        byte_end: null
+      text: "Coordination flow: start with activity_digest, tasks_search_similar,
+        tasks_list_active, locks_list. Then create/claim tasks; acquire locks
+        before edits; update progress at milestones; complete task, release
+        locks, post activity summary."
+```
+
+The search is vector-store based and very flexible. Omitting the `--human` arg will output JSON that can be used in an automation pipeline. Once you set up the AGENTS.md file you can bootstrap adherence to this system in a similar fashion.
 
 ## Locks automation (post-commit)
 
@@ -89,19 +124,15 @@ set -euo pipefail
 prefrontal locks release-changed --agent-id "$PREFRONTAL_AGENT_ID" --base HEAD~1 --head HEAD >/dev/null || true
 ```
 
+Doing this saves your agent from the responsibility of clearing locks, otherwise you would have them manually clear their own locks or rely on TTL.
+
 ## Project identity (worktree-safe)
 
-By default, the MCP server derives a per-repo Qdrant prefix from your git
-repository’s **common git dir**, so starting the server from any worktree
-directory (even sibling worktrees outside the repo root) still shares the same
-“brain”.
+By default, the MCP server derives a per-repo Qdrant prefix from your git repository’s **common git dir**, so starting the server from any worktree directory (even sibling worktrees outside the repo root) still shares the same “brain”.
 
 ## Path normalization (worktree-safe)
 
-All file paths stored in tasks, activity, memory, stats, and locks are
-normalized to **repo-relative paths**. Absolute paths are converted using git
-worktree roots, so the same file is represented consistently across different
-worktrees.
+All file paths stored in tasks, activity, memory, stats, and locks are normalized to **repo-relative paths**. Absolute paths are converted using git worktree roots, so the same file is represented consistently across different worktrees.
 
 Override behavior (highest priority first):
 
