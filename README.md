@@ -1,4 +1,6 @@
-![Prefrontal logo](assets/logo.png)
+<p align="center">
+  <img src="assets/logo.png" alt="Prefrontal logo">
+</p>
 
 # Prefrontal
 
