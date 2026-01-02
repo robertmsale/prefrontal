@@ -28,6 +28,21 @@ Defaults:
 - Qdrant: `http://127.0.0.1:6333`
 - Ollama: `http://127.0.0.1:11434` using `mxbai-embed-large`
 
+## Features & rationale
+
+Prefrontal exists to solve coordination drift in multi-agent (or multi-human)
+workflows: duplicated work, conflicting edits, and a lack of shared situational
+awareness across worktrees. It provides a single MCP server that acts as:
+
+- **Coordination blackboard**: tasks, locks, and activity events that let agents
+  claim work, avoid collisions, and understand what changed recently.
+- **Derived semantic index (“memory”)**: a fast, searchable map of repo/docs
+  chunks to locate relevant context without treating it as source of truth.
+
+The design intentionally separates **authoritative reality** (the repo and
+tracked docs) from **derived memory**, so agents can move quickly while still
+verifying decisions against real files.
+
 ## CLI (single entrypoint)
 
 Install into your PATH:
