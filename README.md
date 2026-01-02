@@ -1,3 +1,5 @@
+![Prefrontal logo](assets/logo.png)
+
 # Prefrontal
 
 Coordination blackboard + derived semantic index for agent swarms.
