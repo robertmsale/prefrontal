@@ -63,7 +63,7 @@ function emit(data: unknown, flags?: Record<string, string>) {
     out(yaml);
     return;
   }
-  emit(data, flags);
+  out(JSON.stringify(data, null, 2));
 }
 
 function cleanEnv(v: string | undefined | null): string | null {
