@@ -43,10 +43,10 @@ The design intentionally separates **authoritative reality** (the repo and track
 
 This MCP server is a good fit if all of the following are true:
 
-✅ You use multiple coding assistants on the same project
-✅ Your coding assistants are working asynchronously
-✅ Your coding assistants are in separate worktrees
-✅ Your git workflow is highly automated
+- ✅ You use multiple coding assistants on the same project
+- ✅ Your coding assistants are working asynchronously
+- ✅ Your coding assistants are in separate worktrees
+- ✅ Your git workflow is highly automated
 
 Do *not* use prefrontal if you are working with a single coding assistant in a synchronous environment with zero automation. Instead, refer to this project's AGENTS.md for a baseline memory & planning system which provides the same benefits with significantly less overhead. Prefrontal is a perfect example of a project that *should not* use prefrontal due to size and simplicity. 
 
